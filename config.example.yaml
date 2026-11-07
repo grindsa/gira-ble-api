@@ -1,0 +1,24 @@
+# Copy to config.yaml and fill in your thermostat MAC addresses.
+# Find MACs with a phone BLE scanner (nRF Connect, LightBlue) or macOS
+# Bluetooth Explorer / PacketLogger while the device is advertising
+# (press the pairing button briefly if needed so it advertises).
+
+host: 127.0.0.1
+port: 8787
+
+# Seconds since last advertisement before a thermostat is considered offline.
+online_timeout_s: 120
+
+# BLE connect / write timeout for setpoint commands.
+ble_timeout_s: 20
+
+# Keep GATT open briefly for rapid successive commands, then disconnect.
+idle_disconnect_s: 5
+
+thermostats:
+  - id: living
+    name: Wohnzimmer
+    mac: "AA:BB:CC:DD:EE:FF"
+  # - id: bedroom
+  #   name: Schlafzimmer
+  #   mac: "11:22:33:44:55:66"
