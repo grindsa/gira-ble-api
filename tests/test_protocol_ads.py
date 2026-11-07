@@ -10,7 +10,7 @@ def test_parse_current_temperature_frame() -> None:
     # F7 01 41 01 FE 10 01 0C 14 — actual temp (community / stho prefix)
     payload = bytes.fromhex("F7014101FE10010C14")
     update = parse_manufacturer_data(payload)
-    assert update.temperature_c == 20.92
+    assert update.temperature_c == 20.84  # 3092 → high-scale decode
     assert update.setpoint_c is None
 
 
@@ -28,7 +28,7 @@ def test_parse_combined_or_prefixed_payload() -> None:
     current = bytes.fromhex("F7014101FE10010C14")
     payload = header + current
     update = parse_manufacturer_data(payload)
-    assert update.temperature_c == 20.92
+    assert update.temperature_c == 20.84
 
 
 def test_parse_both_frames_in_one_blob() -> None:
@@ -37,7 +37,7 @@ def test_parse_both_frames_in_one_blob() -> None:
         "F7006501FF1001060E"  # setpoint
     )
     update = parse_manufacturer_data(payload)
-    assert update.temperature_c == 20.92
+    assert update.temperature_c == 20.84
     assert update.setpoint_c == 15.50
 
 

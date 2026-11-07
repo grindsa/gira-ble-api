@@ -1,0 +1,43 @@
+# gira-ble-api — systemd unit for Raspberry Pi / Linux
+#
+# Assumed install layout under /usr/local:
+#   /usr/local/lib/gira-ble-api/          # project tree (src, pyproject, …)
+#   /usr/local/lib/gira-ble-api/.venv/    # python venv with `pip install -e .`
+#   /usr/local/etc/gira-ble-api/config.yaml
+#
+# Install:
+#   sudo cp deploy/gira-ble-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gira-ble-api
+#
+# Logs: journalctl -u gira-ble-api -f
+
+[Unit]
+Description=Gira System 3000 BLE REST API
+Documentation=file:///usr/local/lib/gira-ble-api/README.md
+After=network-online.target bluetooth.target
+Wants=network-online.target bluetooth.target
+
+[Service]
+Type=simple
+User=gira-ble
+Group=gira-ble
+# BlueZ access (user must also be in group `bluetooth`)
+SupplementaryGroups=bluetooth
+
+WorkingDirectory=/usr/local/lib/gira-ble-api
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/lib/gira-ble-api/.venv/bin/gira-ble-api serve \
+  -c /usr/local/etc/gira-ble-api/config.yaml
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Light hardening — avoid ProtectSystem=strict here; BlueZ needs D-Bus.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

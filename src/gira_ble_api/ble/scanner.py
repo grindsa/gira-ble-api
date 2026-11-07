@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 
@@ -17,7 +16,7 @@ from .client import normalize_mac
 
 logger = logging.getLogger(__name__)
 
-AdCallback = Callable[[str, AdvertisementUpdate, int | None], None]
+AdCallback = Callable[[str, AdvertisementUpdate, int | None, BLEDevice], None]
 
 
 class BleScanner:
@@ -32,6 +31,10 @@ class BleScanner:
         self._on_advertisement = on_advertisement
         self._scanner: BleakScanner | None = None
         self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
 
     async def start(self) -> None:
         if self._running:
@@ -82,18 +85,6 @@ class BleScanner:
             return
 
         try:
-            self._on_advertisement(address, update, advertisement_data.rssi)
+            self._on_advertisement(address, update, advertisement_data.rssi, device)
         except Exception:
             logger.exception("advertisement callback failed for %s", address)
-
-
-async def run_scanner_forever(
-    scanner: BleScanner,
-    stop_event: asyncio.Event,
-) -> None:
-    """Start scanner and wait until stop_event is set."""
-    await scanner.start()
-    try:
-        await stop_event.wait()
-    finally:
-        await scanner.stop()

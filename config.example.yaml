@@ -1,7 +1,7 @@
 # Copy to config.yaml and fill in your thermostat MAC addresses.
-# Find MACs with a phone BLE scanner (nRF Connect, LightBlue) or macOS
-# Bluetooth Explorer / PacketLogger while the device is advertising
-# (press the pairing button briefly if needed so it advertises).
+# Find MACs with the built-in scanner (no phone app needed):
+#   gira-ble-api scan
+# Stand near the device; press pairing briefly if it is quiet.
 
 host: 127.0.0.1
 port: 8787
@@ -9,8 +9,8 @@ port: 8787
 # Seconds since last advertisement before a thermostat is considered offline.
 online_timeout_s: 120
 
-# BLE connect / write timeout for setpoint commands.
-ble_timeout_s: 20
+# BLE connect / write timeout for setpoint commands (macOS: allow time for Pair popup).
+ble_timeout_s: 30
 
 # Keep GATT open briefly for rapid successive commands, then disconnect.
 idle_disconnect_s: 5

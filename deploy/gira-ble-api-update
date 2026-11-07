@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Update gira-ble-api under /usr/local and restart the systemd service.
+#
+# Install (once):
+#   sudo install -m 755 deploy/gira-ble-api-update /usr/local/lib/gira-ble-api/deploy/gira-ble-api-update
+#   sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-api-update /usr/local/bin/gira-ble-api-update
+#   # or after first checkout simply:
+#   sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-api-update /usr/local/bin/gira-ble-api-update
+#
+# Usage:
+#   sudo gira-ble-api-update
+#   sudo gira-ble-api-update --branch main
+#   sudo gira-ble-api-update --dry-run
+
+set -euo pipefail
+
+APP_DIR="${GIRA_BLE_APP_DIR:-/usr/local/lib/gira-ble-api}"
+ETC_DIR="${GIRA_BLE_ETC_DIR:-/usr/local/etc/gira-ble-api}"
+VENV_DIR="${APP_DIR}/.venv"
+SERVICE_NAME="${GIRA_BLE_SERVICE:-gira-ble-api}"
+SERVICE_SRC="${APP_DIR}/deploy/gira-ble-api.service"
+SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}.service"
+REMOTE_URL="${GIRA_BLE_REMOTE_URL:-https://github.com/grindsa/gira-ble-api}"
+REMOTE_NAME="${GIRA_BLE_REMOTE_NAME:-origin}"
+BRANCH="${GIRA_BLE_BRANCH:-main}"
+APP_USER="${GIRA_BLE_USER:-gira-ble}"
+DRY_RUN=0
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options]
+
+Fetch/update ${REMOTE_URL}, reinstall the package into the venv,
+refresh the systemd unit if needed, and restart ${SERVICE_NAME}.
+
+Options:
+  -b, --branch NAME   Git branch to deploy (default: ${BRANCH})
+  -n, --dry-run       Show actions without changing the system
+  -h, --help          Show this help
+EOF
+}
+
+log() { printf '==> %s\n' "$*"; }
+run() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf 'DRY-RUN:';
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -b|--branch) BRANCH="$2"; shift 2 ;;
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root (e.g. sudo $(basename "$0"))." >&2
+  exit 1
+fi
+
+if [[ ! -d "${APP_DIR}/.git" ]]; then
+  echo "Not a git checkout: ${APP_DIR}" >&2
+  echo "Clone first, e.g.:" >&2
+  echo "  git clone ${REMOTE_URL} ${APP_DIR}" >&2
+  exit 1
+fi
+
+if [[ ! -x "${VENV_DIR}/bin/pip" ]]; then
+  echo "Missing venv at ${VENV_DIR}. Create it before updating." >&2
+  exit 1
+fi
+
+if ! id -u "${APP_USER}" >/dev/null 2>&1; then
+  echo "System user '${APP_USER}' does not exist." >&2
+  exit 1
+fi
+
+cd "${APP_DIR}"
+
+log "Ensuring remote '${REMOTE_NAME}' → ${REMOTE_URL}"
+if git remote get-url "${REMOTE_NAME}" >/dev/null 2>&1; then
+  current="$(git remote get-url "${REMOTE_NAME}")"
+  if [[ "${current}" != "${REMOTE_URL}" && "${current}" != "${REMOTE_URL}.git" ]]; then
+    log "Updating remote URL (${current} → ${REMOTE_URL})"
+    run git remote set-url "${REMOTE_NAME}" "${REMOTE_URL}"
+  fi
+else
+  run git remote add "${REMOTE_NAME}" "${REMOTE_URL}"
+fi
+
+log "Fetching ${REMOTE_NAME}"
+run git fetch --prune --tags "${REMOTE_NAME}"
+
+target_ref="${REMOTE_NAME}/${BRANCH}"
+if ! git rev-parse --verify --quiet "${target_ref}" >/dev/null; then
+  echo "Remote branch not found: ${target_ref}" >&2
+  exit 1
+fi
+
+before="$(git rev-parse HEAD)"
+after="$(git rev-parse "${target_ref}")"
+log "Current  ${before}"
+log "Upstream ${after} (${target_ref})"
+
+if [[ "${before}" == "${after}" ]]; then
+  log "Already up to date at ${before}"
+else
+  log "Resetting working tree to ${target_ref}"
+  # Deploy tree only — runtime config lives under ${ETC_DIR}, not in git.
+  run git reset --hard "${target_ref}"
+  run git clean -fd -e .venv
+fi
+
+log "Reinstalling Python package into ${VENV_DIR}"
+run sudo -u "${APP_USER}" -H "${VENV_DIR}/bin/pip" install -U pip setuptools wheel
+run sudo -u "${APP_USER}" -H "${VENV_DIR}/bin/pip" install -e "${APP_DIR}"
+
+if [[ -f "${SERVICE_SRC}" ]]; then
+  if [[ ! -f "${SERVICE_DST}" ]] || ! cmp -s "${SERVICE_SRC}" "${SERVICE_DST}"; then
+    log "Installing/updating systemd unit ${SERVICE_DST}"
+    run cp "${SERVICE_SRC}" "${SERVICE_DST}"
+    run systemctl daemon-reload
+  else
+    log "systemd unit unchanged"
+  fi
+else
+  log "No ${SERVICE_SRC}; skipping unit refresh"
+fi
+
+if [[ ! -f "${ETC_DIR}/config.yaml" ]]; then
+  echo "WARNING: missing ${ETC_DIR}/config.yaml — service may fail to start." >&2
+fi
+
+log "Restarting ${SERVICE_NAME}"
+run systemctl restart "${SERVICE_NAME}"
+run systemctl --no-pager --full status "${SERVICE_NAME}" || true
+
+log "Update finished (HEAD=$(git rev-parse --short HEAD))"

@@ -13,10 +13,11 @@ from .temp import clamp_setpoint, encode_setpoint_u16
 def build_setpoint_command(temp_c: float) -> bytes:
     """Build a write command that sets the absolute thermostat setpoint.
 
-    Frame layout:
+    Frame layout (matches stho/fc2800 HA integrations):
       F6 00 65 01 F5 10 01 <hi> <lo>
 
-    where <hi><lo> is encode_setpoint_u16(temp_c).
+    where <hi><lo> is encode_setpoint_u16(temp_c) big-endian.
+    Property 0xF5 = write target; ads report status on 0xFF.
     """
     clamped = clamp_setpoint(temp_c)
     raw = encode_setpoint_u16(clamped)
@@ -27,7 +28,7 @@ def build_setpoint_command(temp_c: float) -> bytes:
             0x01,
             THERMO_PROPERTY_TARGET_TEMP,
             0x10,
-            0x01,
+            0x01,  # element length field used by Gira (not raw byte count)
             (raw >> 8) & 0xFF,
             raw & 0xFF,
         ]

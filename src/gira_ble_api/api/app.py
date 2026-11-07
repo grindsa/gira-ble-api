@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import logging
+import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from gira_ble_api.ble.client import BleClient, BleCommandError
-from gira_ble_api.ble.scanner import BleScanner
+from gira_ble_api.ble.client import BleCommandError
+from gira_ble_api.ble.controller import BleController
 from gira_ble_api.config import AppConfig
 from gira_ble_api.protocol import build_setpoint_command
 from gira_ble_api.protocol.temp import clamp_setpoint
@@ -38,40 +39,31 @@ def create_app(
         config.thermostats,
         online_timeout_s=config.online_timeout_s,
     )
-    clients: dict[str, BleClient] = {
-        t.id: BleClient(
-            t.mac,
-            timeout_s=config.ble_timeout_s,
-            idle_disconnect_s=config.idle_disconnect_s,
-        )
-        for t in config.thermostats
-    }
-    scanner: BleScanner | None = None
+    controller: BleController | None = None
 
     def on_ad(mac: str, update: Any, rssi: int | None) -> None:
         store.apply_advertisement(mac, update, rssi)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal scanner
+        nonlocal controller
         if enable_ble and config.thermostats:
-            scanner = BleScanner(
+            controller = BleController(
                 {t.mac for t in config.thermostats},
                 on_advertisement=on_ad,
+                ble_timeout_s=max(config.ble_timeout_s, 30.0),
             )
+            app.state.controller = controller
             try:
-                await scanner.start()
+                await controller.start()
             except Exception:
                 logger.exception(
                     "Failed to start BLE scanner — API will still serve "
-                    "configured devices without live ads"
+                    "configured devices; setpoint may still work"
                 )
-                scanner = None
         yield
-        if scanner is not None:
-            await scanner.stop()
-        for client in clients.values():
-            await client.close()
+        if controller is not None:
+            await controller.stop()
 
     app = FastAPI(
         title="gira-ble-api",
@@ -79,14 +71,47 @@ def create_app(
         description="REST API for Gira System 3000 Bluetooth thermostats",
         lifespan=lifespan,
     )
-    # Available before lifespan (TestClient / import-time) and during runtime.
     app.state.store = store
     app.state.config = config
-    app.state.clients = clients
+    app.state.controller = controller
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/discover")
+    async def discover(seconds: float = 10.0) -> dict:
+        """Listen for nearby Gira ads and return addresses for config."""
+        if not enable_ble:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "BLE disabled (--no-ble)", "code": "ble_disabled"},
+            )
+        secs = max(1.0, min(float(seconds), 60.0))
+        from gira_ble_api.ble.discover import discover_gira_devices
+
+        ctrl: BleController | None = app.state.controller
+        try:
+            # Avoid fighting the background scanner on macOS.
+            if ctrl is not None:
+                await ctrl.stop()
+            devices = await discover_gira_devices(seconds=secs)
+        except Exception as exc:
+            logger.exception("discover failed")
+            raise HTTPException(
+                status_code=502,
+                detail={"error": str(exc), "code": "ble_error"},
+            ) from exc
+        finally:
+            if ctrl is not None:
+                try:
+                    await ctrl.start()
+                except Exception:
+                    logger.exception("failed to resume scanner after discover")
+        return {
+            "seconds": secs,
+            "devices": [d.to_dict() for d in devices],
+        }
 
     @app.get("/thermostats")
     async def list_thermostats(request: Request) -> list[dict]:
@@ -114,12 +139,18 @@ def create_app(
         request: Request,
     ) -> dict:
         store: DeviceStore = request.app.state.store
-        clients_map: dict[str, BleClient] = request.app.state.clients
+        ctrl: BleController | None = request.app.state.controller
 
-        if store.get(thermostat_id) is None:
+        state = store.get(thermostat_id)
+        if state is None:
             raise HTTPException(
                 status_code=404,
                 detail={"error": f"Unknown thermostat id: {thermostat_id}", "code": "not_found"},
+            )
+        if ctrl is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "BLE not available", "code": "ble_disabled"},
             )
 
         temp_c = clamp_setpoint(body.celsius)
@@ -131,7 +162,6 @@ def create_app(
                 temp_c,
             )
 
-        client = clients_map[thermostat_id]
         command = build_setpoint_command(temp_c)
         logger.info(
             "Setpoint %s → %.1f°C cmd=%s",
@@ -139,12 +169,17 @@ def create_app(
             temp_c,
             command.hex(),
         )
+        if sys.platform == "darwin":
+            logger.info(
+                "macOS: if this is the first write, enable pairing mode on the "
+                "device and accept the system Bluetooth pairing popup"
+            )
 
         try:
-            await client.write(command)
+            await ctrl.write_command(state["mac"], command)
         except BleCommandError as exc:
             store.set_error(thermostat_id, str(exc))
-            status = 504 if exc.code == "ble_timeout" else 502
+            status = 504 if exc.code in {"ble_timeout", "not_found"} else 502
             if exc.code == "not_paired":
                 status = 503
             raise HTTPException(
@@ -153,8 +188,8 @@ def create_app(
             ) from exc
 
         store.set_setpoint_optimistic(thermostat_id, temp_c)
-        state = store.get(thermostat_id)
-        assert state is not None
-        return state
+        updated = store.get(thermostat_id)
+        assert updated is not None
+        return updated
 
     return app

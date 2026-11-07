@@ -6,28 +6,26 @@ from .constants import THERMO_DUAL_SCALE_THRESHOLD, THERMO_MAX_C, THERMO_MIN_C
 
 
 def decode_thermo_temp_u16(raw: int) -> float:
-    """Decode advertisement temperature from a big-endian u16.
+    """Decode advertisement / notification temperature from a big-endian u16.
 
-    Gira uses a dual-scale encoding for thermostat ads:
+    Dual scale (fc2800 / stho reverse engineering):
     - raw <= 2100 → °C = raw / 100
-    - raw >  2100 → °C = raw / 100 - 10
+      (manual UI / simple ads, e.g. 1550 → 15.5 °C)
+    - raw >  2100 → °C = 21 + (raw - 3100) / 50
+      (same scale used by absolute GATT writes)
 
-    Examples from community captures:
-    - 0x060E (1550) → 15.5 °C (setpoint)
-    - 0x0C14 (3092) → 20.92 °C (actual; often reported ~21.0)
+    Round-trip with encode_setpoint_u16 for the high scale.
     """
     raw = int(raw) & 0xFFFF
-    temp = raw / 100.0
-    if raw > THERMO_DUAL_SCALE_THRESHOLD:
-        temp -= 10.0
-    return round(temp, 2)
+    if raw <= THERMO_DUAL_SCALE_THRESHOLD:
+        return round(raw / 100.0, 2)
+    return round(21.0 + (raw - 3100) / 50.0, 2)
 
 
 def encode_setpoint_u16(temp_c: float) -> int:
     """Encode a setpoint (°C) for the GATT write command.
 
-    Device-specific write encoding (not the same as advertisement raw):
-        raw = round((21 + temp_c) * 50 + 1000)
+    raw = round((21 + temp_c) * 50 + 1000)
     """
     raw = int(round((21.0 + float(temp_c)) * 50.0 + 1000.0))
     return max(0, min(0xFFFF, raw))

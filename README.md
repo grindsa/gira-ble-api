@@ -31,9 +31,11 @@ Gira 539403  ←BLE→  gira-ble-api (Bleak)  ←HTTP REST→  clients (curl / d
 
 ```bash
 cd gira-ble-api
-# Python 3.11+ (Homebrew: brew install python@3.12)
-python3.12 -m venv .venv
+# Python 3.11+ required. macOS system python3 is often 3.9 — use Homebrew:
+#   brew install python@3.12
+/opt/homebrew/bin/python3.12 -m venv .venv
 source .venv/bin/activate
+python -m pip install -U pip setuptools wheel
 pip install -e ".[dev]"
 
 cp config.example.yaml config.yaml
@@ -56,16 +58,35 @@ for Bluetooth access for Terminal / your IDE. Allow it, or grant Bluetooth under
 
 **Do not run this in Docker on Mac** — there is no BLE adapter passthrough.
 
-### Finding the MAC address
+### Finding the MAC address (built-in scan)
 
-1. Put the thermostat into advertising / pairing mode (see device instructions;
-   usually a long-press of the pairing button on the front).
-2. Scan with a phone app (**nRF Connect**, **LightBlue**) or a Mac BLE explorer.
-3. Look for a Gira / System 3000 device; copy the Bluetooth address into
-   `config.yaml` as `mac: "AA:BB:CC:DD:EE:FF"`.
+You do **not** need a phone app. Use the host adapter:
+
+```bash
+# Listen ~15s for Gira manufacturer ads (company id 1412)
+gira-ble-api scan
+
+# Longer window / machine-readable
+gira-ble-api scan --seconds 30 --json
+```
+
+1. Stand near the thermostat (or briefly press pairing so it advertises).
+2. Run `gira-ble-api scan` — copy the `ADDRESS` column into `config.yaml`
+   as `mac: "…"`.
+3. Thermostats that already broadcast temp/setpoint show those values and a
+   `thermostat` hint; strongest RSSI is listed first.
+
+**Which UUID is which room?** Easiest: set a distinctive setpoint on the
+physical unit (e.g. **7.5 °C**), run `scan`, and match `SETPOINT°C`.
+Alternatives: match `TEMP°C` to the display, or walk up and pick the
+strongest RSSI.
+
+While the API is running you can also call `GET /discover?seconds=10`
+(blocks until the window ends). Prefer the CLI when possible — on macOS only
+one process should drive discovery at a time.
 
 On some macOS setups CoreBluetooth exposes a UUID-style identifier instead of a
-classic MAC — paste whatever Bleak / the scanner shows; the service normalizes
+classic MAC — paste whatever the scanner prints; the service normalizes
 colon-separated MACs when possible.
 
 ## Configuration
@@ -95,6 +116,7 @@ thermostats:
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{ "ok": true }` |
+| `GET` | `/discover?seconds=10` | — | Nearby Gira devices (blocks for the scan window) |
 | `GET` | `/thermostats` | — | List of configured devices + last known state |
 | `GET` | `/thermostats/{id}` | — | One device |
 | `POST` | `/thermostats/{id}/setpoint` | `{ "celsius": 21.0 }` | Updated state on success |
@@ -106,10 +128,18 @@ State fields: `id`, `name`, `mac`, `online`, `temperature_c`, `setpoint_c`,
 
 Temperature is read from **passive advertisements** (no pairing required).
 
-Setting the setpoint requires a **GATT connection**. On **first use**, put the
-thermostat into **pairing mode** while the API attempts the write (the service
-retries within `ble_timeout_s`, default ~20s). After bonding, later setpoints
-usually work without pairing mode.
+Setting the setpoint requires a **GATT connection**. The service **pauses** the
+passive scanner while connecting (required for reliable connects on macOS).
+
+On **first use** (especially on Mac):
+
+1. Put the thermostat into **pairing mode** (menu → Bluetooth → YES; BT icon blinks).
+2. Send the setpoint request immediately.
+3. On macOS, watch for a **system Bluetooth pairing popup** and click **Pair** —
+   Bleak cannot pair programmatically; the first encrypted GATT write triggers it.
+4. Stay near the device; expect up to ~30–60s with retries.
+
+After bonding, later setpoints usually work without pairing mode.
 
 ```bash
 # Put device in pairing mode first (first time only)
@@ -152,29 +182,14 @@ pytest
 
 ## Raspberry Pi (follow-up)
 
-Same code; Bleak uses BlueZ.
+Same code; Bleak uses BlueZ. Re-scan on the Pi for classic MACs (Mac UUIDs
+do not transfer). Ready-made unit + `/usr/local` layout:
 
-1. Enable Bluetooth (`sudo rfkill unblock bluetooth`), join the `bluetooth` group.
-2. Use the same venv + `config.yaml`.
-3. Optional systemd unit sketch:
+- [`deploy/gira-ble-api.service`](deploy/gira-ble-api.service)
+- [`deploy/README.md`](deploy/README.md)
 
-```ini
-[Unit]
-Description=gira-ble-api
-After=bluetooth.target network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/gira-ble-api
-ExecStart=/home/pi/gira-ble-api/.venv/bin/gira-ble-api -c /home/pi/gira-ble-api/config.yaml
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Bind to LAN only behind a firewall/reverse proxy if you leave the Pi exposed.
+Bind to LAN only behind a firewall/reverse proxy if you leave the Pi exposed
+(`host: 0.0.0.0` in config).
 
 ## Security
 
