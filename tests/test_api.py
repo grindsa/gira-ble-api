@@ -41,6 +41,8 @@ def test_list_thermostats() -> None:
     assert data[0]["mac"] == "AA:BB:CC:DD:EE:FF"
     assert data[0]["online"] is False
     assert data[0]["temperature_c"] is None
+    assert data[0]["last_seen_at"] is None
+    assert data[0]["updated_at"] is None
     assert "paired" in data[0]
 
 

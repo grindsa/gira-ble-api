@@ -44,6 +44,9 @@ class ThermostatState:
             "paired": paired,
             "temperature_c": self.temperature_c,
             "setpoint_c": self.setpoint_c,
+            # Last BLE advertisement received from the device (null until first ad).
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            # Any local state change (ad, optimistic setpoint, or error).
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "rssi": self.rssi,
             "error": self.error,

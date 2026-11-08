@@ -123,7 +123,11 @@ thermostats:
 | `POST` | `/thermostats/{id}/setpoint` | `{ "celsius": 21.0 }` | Updated state on success |
 
 State fields: `id`, `name`, `mac`, `online`, `paired`, `temperature_c`,
-`setpoint_c`, `updated_at`, `rssi`, optional `error`.
+`setpoint_c`, `last_seen_at`, `updated_at`, `rssi`, optional `error`.
+
+`last_seen_at` is the timestamp of the last BLE advertisement from the device
+(null until the first ad). `updated_at` also moves on optimistic setpoint
+writes and errors — use `last_seen_at` for “when did we last hear from it?”.
 
 `paired` is the host OS bond status: BlueZ (`bluetoothctl`) on Linux/Pi,
 `system_profiler` / IOBluetooth on macOS. `true`/`false` when known;
