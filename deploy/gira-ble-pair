@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Pair a Gira System 3000 device with BlueZ (Raspberry Pi).
+#
+# Usage:
+#   sudo gira-ble-pair C7:F5:40:A6:81:66
+#   sudo /usr/local/lib/gira-ble-api/deploy/gira-ble-pair AA:BB:CC:DD:EE:FF
+#
+# Put the thermostat into pairing mode (BT icon blinking) BEFORE running this.
+# Link (optional):
+#   sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair /usr/local/bin/gira-ble-pair
+
+set -euo pipefail
+
+SCAN_SECONDS="${GIRA_BLE_PAIR_SCAN_SECONDS:-8}"
+CONNECT_WAIT_SECONDS="${GIRA_BLE_PAIR_CONNECT_WAIT:-3}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <MAC>
+
+Pair/trust/connect a Gira BLE device via bluetoothctl.
+
+Example:
+  sudo $(basename "$0") C7:F5:40:A6:81:66
+
+Put the device in pairing mode first. Env overrides:
+  GIRA_BLE_PAIR_SCAN_SECONDS   (default: ${SCAN_SECONDS})
+EOF
+}
+
+normalize_mac() {
+  local raw="${1^^}"
+  raw="${raw//-/:}"
+  raw="${raw//./:}"
+  printf '%s\n' "${raw}"
+}
+
+valid_mac() {
+  [[ "${1}" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root (e.g. sudo $(basename "$0") $1)." >&2
+  exit 1
+fi
+
+if ! command -v bluetoothctl >/dev/null 2>&1; then
+  echo "bluetoothctl not found (install bluez)." >&2
+  exit 1
+fi
+
+MAC="$(normalize_mac "$1")"
+if ! valid_mac "${MAC}"; then
+  echo "Invalid MAC address: $1" >&2
+  echo "Expected form: AA:BB:CC:DD:EE:FF" >&2
+  exit 2
+fi
+
+echo "==> Target ${MAC}"
+echo "==> Put the thermostat in pairing mode now (BT icon blinking)."
+echo "==> Continuing in 3s…"
+sleep 3
+
+echo "==> Removing any previous bond for ${MAC} (ignore errors)"
+bluetoothctl remove "${MAC}" >/dev/null 2>&1 || true
+
+echo "==> Power on + agent"
+bluetoothctl <<EOF
+power on
+agent NoInputNoOutput
+default-agent
+EOF
+
+echo "==> Scanning ${SCAN_SECONDS}s so BlueZ sees the device…"
+bluetoothctl scan on >/dev/null &
+SCAN_PID=$!
+sleep "${SCAN_SECONDS}"
+bluetoothctl scan off >/dev/null 2>&1 || true
+kill "${SCAN_PID}" >/dev/null 2>&1 || true
+wait "${SCAN_PID}" 2>/dev/null || true
+
+echo "==> Pair / trust / connect ${MAC}"
+if ! bluetoothctl pair "${MAC}"; then
+  echo "ERROR: pair failed. Is the device in pairing mode and nearby?" >&2
+  exit 1
+fi
+
+bluetoothctl trust "${MAC}"
+if ! bluetoothctl connect "${MAC}"; then
+  echo "WARNING: connect failed after pair — bond may still be OK." >&2
+  echo "         Check: bluetoothctl devices Paired" >&2
+else
+  sleep "${CONNECT_WAIT_SECONDS}"
+  bluetoothctl disconnect "${MAC}" >/dev/null 2>&1 || true
+fi
+
+echo
+echo "==> Paired devices:"
+bluetoothctl devices Paired
+echo
+if bluetoothctl devices Paired | grep -qi "${MAC}"; then
+  echo "OK: ${MAC} is paired. You can set setpoints via the API now."
+  exit 0
+fi
+
+echo "ERROR: ${MAC} not listed under devices Paired." >&2
+exit 1

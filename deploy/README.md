@@ -44,31 +44,34 @@ journalctl -u gira-ble-api -f
 ## First-time BLE pairing (BlueZ / Pi)
 
 `AuthenticationCanceled` from Bleak usually means BlueZ had no pairing agent.
-Bond each thermostat once with `bluetoothctl` while it is in **pairing mode**:
+Bond each thermostat once while it is in **pairing mode**.
+
+Helper script (MAC only):
 
 ```bash
-# 1) Put thermostat in pairing mode (menu → Bluetooth → YES; icon blinks)
+sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair \
+  /usr/local/bin/gira-ble-pair
 
-# 2) On the Pi:
+# 1) Thermostat: menu → Bluetooth → YES (icon blinks)
+# 2) Pi:
+sudo gira-ble-pair C7:F5:40:A6:81:66
+```
+
+Manual equivalent:
+
+```bash
 sudo bluetoothctl
 power on
 agent NoInputNoOutput
 default-agent
 scan on
-# wait until you see C7:F5:40:A6:81:66 (example)
 pair C7:F5:40:A6:81:66
 trust C7:F5:40:A6:81:66
 connect C7:F5:40:A6:81:66
-# optional: disconnect
-exit
+quit
 ```
 
-If a previous attempt left a bad bond:
-
-```bash
-sudo bluetoothctl remove C7:F5:40:A6:81:66
-```
-
+Clear a bad bond: `sudo bluetoothctl remove C7:F5:40:A6:81:66`  
 Then retry the API setpoint (pairing mode usually not needed after a successful bond).
 
 ## Updates
