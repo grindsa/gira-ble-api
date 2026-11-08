@@ -11,6 +11,22 @@ from pydantic import BaseModel, Field, field_validator
 from gira_ble_api.ble.client import normalize_mac
 
 
+def parse_api_tokens(value: Any) -> list[str]:
+    """Normalize api_tokens from YAML (comma-string, list, or empty)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, list):
+        tokens: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                tokens.append(text)
+        return tokens
+    raise ValueError("api_tokens must be a string, list, or empty")
+
+
 class ThermostatConfig(BaseModel):
     id: str
     name: str
@@ -36,7 +52,14 @@ class AppConfig(BaseModel):
     online_timeout_s: float = 120.0
     ble_timeout_s: float = 20.0
     idle_disconnect_s: float = 5.0
+    # Empty / omitted → no auth. Comma-separated string or YAML list of Bearer tokens.
+    api_tokens: list[str] = Field(default_factory=list)
     thermostats: list[ThermostatConfig] = Field(default_factory=list)
+
+    @field_validator("api_tokens", mode="before")
+    @classmethod
+    def _parse_tokens(cls, value: Any) -> list[str]:
+        return parse_api_tokens(value)
 
     @field_validator("thermostats")
     @classmethod

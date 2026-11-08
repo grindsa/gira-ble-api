@@ -6,6 +6,16 @@
 host: 127.0.0.1
 port: 8787
 
+# Optional API tokens (Bearer). Omit or leave empty for open access.
+# Single line (comma-separated) or a YAML list — both work.
+#   api_tokens: "dashboard-secret, laptop-curl"
+#   api_tokens:
+#     - dashboard-secret
+#     - laptop-curl
+# Clients send:  Authorization: Bearer dashboard-secret
+# /health stays unauthenticated. Keep this file mode 600 on the Pi.
+api_tokens: ""
+
 # Seconds since last advertisement before a thermostat is considered offline.
 online_timeout_s: 120
 

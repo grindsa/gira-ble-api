@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from gira_ble_api.api.auth import BearerTokenMiddleware
 from gira_ble_api.ble.client import BleCommandError
 from gira_ble_api.ble.controller import BleController
 from gira_ble_api.config import AppConfig
@@ -74,6 +75,15 @@ def create_app(
     app.state.store = store
     app.state.config = config
     app.state.controller = controller
+
+    if config.api_tokens:
+        app.add_middleware(BearerTokenMiddleware, tokens=config.api_tokens)
+        logger.info(
+            "API auth enabled (%d token(s)); /health remains open",
+            len(config.api_tokens),
+        )
+    else:
+        logger.info("API auth disabled (no api_tokens in config)")
 
     @app.get("/health")
     async def health() -> dict[str, bool]:

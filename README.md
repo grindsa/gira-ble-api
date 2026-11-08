@@ -107,6 +107,7 @@ thermostats:
 
 | Key | Meaning |
 | --- | --- |
+| `api_tokens` | Optional Bearer tokens (comma-string or list). Empty → no auth |
 | `online_timeout_s` | No ad within this window → `online: false` |
 | `ble_timeout_s` | Connect/write timeout for setpoint |
 | `idle_disconnect_s` | Drop GATT after a successful write |
@@ -143,6 +144,7 @@ After bonding, later setpoints usually work without pairing mode.
 
 ```bash
 # Put device in pairing mode first (first time only)
+# Add -H "Authorization: Bearer <token>" when api_tokens is configured
 curl -s -X POST http://127.0.0.1:8787/thermostats/living/setpoint \
   -H 'Content-Type: application/json' \
   -d '{"celsius": 21.0}'
@@ -193,8 +195,18 @@ Bind to LAN only behind a firewall/reverse proxy if you leave the Pi exposed
 
 ## Security
 
-v1 has **no authentication**. Default bind is localhost. For LAN access, put a
-reverse proxy (or OS firewall) in front and add auth later.
+Optional Bearer tokens via `api_tokens` in config (omit/empty = open access):
+
+```yaml
+api_tokens: "dashboard-secret, laptop-curl"
+```
+
+```bash
+curl -s -H "Authorization: Bearer dashboard-secret" http://127.0.0.1:8787/thermostats
+```
+
+`GET /health` stays open. Tokens are plaintext in config — use file mode `600`.
+Still HTTP (sniffable on LAN); add HTTPS / reverse proxy / Tailscale when needed.
 
 ## Protocol notes (thermostat)
 
