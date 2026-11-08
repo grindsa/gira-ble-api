@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from gira_ble_api.api.auth import BearerTokenMiddleware
 from gira_ble_api.ble.client import BleCommandError
 from gira_ble_api.ble.controller import BleController
+from gira_ble_api.ble.pairing import paired_map_async
 from gira_ble_api.config import AppConfig
 from gira_ble_api.protocol import build_setpoint_command
 from gira_ble_api.protocol.temp import clamp_setpoint
@@ -125,14 +126,19 @@ def create_app(
 
     @app.get("/thermostats")
     async def list_thermostats(request: Request) -> list[dict]:
-        return request.app.state.store.list()
+        store: DeviceStore = request.app.state.store
+        rows = store.list()
+        paired = await paired_map_async([row["mac"] for row in rows])
+        return store.list(paired_by_mac=paired)
 
     @app.get("/thermostats/{thermostat_id}")
     async def get_thermostat(thermostat_id: str, request: Request) -> dict:
-        state = request.app.state.store.get(thermostat_id)
+        store: DeviceStore = request.app.state.store
+        state = store.get(thermostat_id)
         if state is None:
             raise HTTPException(status_code=404, detail=f"Unknown thermostat id: {thermostat_id}")
-        return state
+        paired = await paired_map_async([state["mac"]])
+        return store.get(thermostat_id, paired=paired.get(state["mac"])) or state
 
     @app.post(
         "/thermostats/{thermostat_id}/setpoint",
@@ -198,7 +204,8 @@ def create_app(
             ) from exc
 
         store.set_setpoint_optimistic(thermostat_id, temp_c)
-        updated = store.get(thermostat_id)
+        paired = await paired_map_async([state["mac"]])
+        updated = store.get(thermostat_id, paired=paired.get(state["mac"]))
         assert updated is not None
         return updated
 

@@ -122,8 +122,12 @@ thermostats:
 | `GET` | `/thermostats/{id}` | — | One device |
 | `POST` | `/thermostats/{id}/setpoint` | `{ "celsius": 21.0 }` | Updated state on success |
 
-State fields: `id`, `name`, `mac`, `online`, `temperature_c`, `setpoint_c`,
-`updated_at`, `rssi`, optional `error`.
+State fields: `id`, `name`, `mac`, `online`, `paired`, `temperature_c`,
+`setpoint_c`, `updated_at`, `rssi`, optional `error`.
+
+`paired` is the host OS bond status: BlueZ (`bluetoothctl`) on Linux/Pi,
+`system_profiler` / IOBluetooth on macOS. `true`/`false` when known;
+`null` if the host cannot determine it.
 
 ### Setpoint / pairing
 

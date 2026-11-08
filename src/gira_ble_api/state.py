@@ -26,7 +26,12 @@ class ThermostatState:
     rssi: int | None = None
     error: str | None = None
 
-    def to_dict(self, *, online_timeout_s: float) -> dict:
+    def to_dict(
+        self,
+        *,
+        online_timeout_s: float,
+        paired: bool | None = None,
+    ) -> dict:
         now = _utcnow()
         online = False
         if self.last_seen_at is not None:
@@ -36,6 +41,7 @@ class ThermostatState:
             "name": self.name,
             "mac": self.mac,
             "online": online,
+            "paired": paired,
             "temperature_c": self.temperature_c,
             "setpoint_c": self.setpoint_c,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -64,19 +70,32 @@ class DeviceStore:
             store._mac_to_id[t.mac.upper()] = t.id
         return store
 
-    def list(self) -> list[dict]:
+    def list(self, *, paired_by_mac: dict[str, bool | None] | None = None) -> list[dict]:
         with self._lock:
-            return [
-                s.to_dict(online_timeout_s=self.online_timeout_s)
-                for s in self._by_id.values()
-            ]
+            out: list[dict] = []
+            for s in self._by_id.values():
+                paired = None
+                if paired_by_mac is not None:
+                    paired = paired_by_mac.get(s.mac)
+                out.append(
+                    s.to_dict(online_timeout_s=self.online_timeout_s, paired=paired)
+                )
+            return out
 
-    def get(self, thermostat_id: str) -> dict | None:
+    def get(
+        self,
+        thermostat_id: str,
+        *,
+        paired: bool | None = None,
+    ) -> dict | None:
         with self._lock:
             state = self._by_id.get(thermostat_id)
             if state is None:
                 return None
-            return state.to_dict(online_timeout_s=self.online_timeout_s)
+            return state.to_dict(
+                online_timeout_s=self.online_timeout_s,
+                paired=paired,
+            )
 
     def get_mac(self, thermostat_id: str) -> str | None:
         with self._lock:
