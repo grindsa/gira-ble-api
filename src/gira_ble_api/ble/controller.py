@@ -134,14 +134,24 @@ class BleController:
             code = last_error.code
         elif "timeout" not in msg and not isinstance(last_error, TimeoutError):
             code = "ble_error"
-        if "pair" in msg or "auth" in msg or "not permitted" in msg:
+        if (
+            "pair" in msg
+            or "auth" in msg
+            or "not permitted" in msg
+            or "authenticationcanceled" in msg.replace(" ", "")
+        ):
             code = "not_paired"
-        hint = (
-            " Put the thermostat into pairing mode (BT icon blinking), stand "
-            "close, then retry — and accept any macOS Bluetooth Pair dialog."
-            if sys.platform == "darwin"
-            else " Put the thermostat in pairing mode and stand close, then retry."
-        )
+        if sys.platform == "darwin":
+            hint = (
+                " Put the thermostat into pairing mode (BT icon blinking), stand "
+                "close, then retry — and accept any macOS Bluetooth Pair dialog."
+            )
+        else:
+            hint = (
+                " On Linux/Pi, first-time pairing is more reliable via bluetoothctl "
+                "(agent NoInputNoOutput + pair/trust) while the thermostat is in "
+                "pairing mode — see deploy/README.md. Then retry the setpoint."
+            )
         raise BleCommandError(
             f"BLE failed for {address} after {self._connect_attempts} attempt(s): "
             f"{_exc_text(last_error)}.{hint}",
@@ -210,11 +220,10 @@ class BleController:
             self._ble_timeout_s,
         )
 
-        client = BleakClient(
-            device,
-            timeout=self._ble_timeout_s,
-            pair=sys.platform != "darwin",
-        )
+        # pair=False: on headless BlueZ, pair=True often yields AuthenticationCanceled
+        # without an agent. First bond the device with bluetoothctl (see deploy/README).
+        # macOS ignores pair= and prompts on the first encrypted GATT write instead.
+        client = BleakClient(device, timeout=self._ble_timeout_s, pair=False)
         try:
             await asyncio.wait_for(client.connect(), timeout=self._ble_timeout_s)
             if not client.is_connected:
