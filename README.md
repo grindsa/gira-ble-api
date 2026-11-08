@@ -1,22 +1,24 @@
 # gira-ble-api
 
 Standalone Python service that talks to **Gira System 3000** Bluetooth devices
-(especially the room temperature controller BT, article **5394xx** / e.g. **539403**)
-and exposes a small REST API.
+(room temperature controller BT **5394xx** / e.g. **539403**, and cover/timer BT
+**5367xx** / e.g. **536727**) and exposes a small REST API.
 
 This is **not** a Home Assistant integration. It uses the host Bluetooth adapter
 via [Bleak](https://github.com/hbldh/bleak) (macOS CoreBluetooth now; Linux BlueZ
 on a Raspberry Pi later). Primary consumer: a separate Next.js dashboard.
 
 ```
-Gira 539403  ←BLE→  gira-ble-api (Bleak)  ←HTTP REST→  clients (curl / dashboard)
+Gira 539403 / 536727  ←BLE→  gira-ble-api (Bleak)  ←HTTP REST→  clients (curl / dashboard)
 ```
 
 ## Features (v1)
 
-- Passive scan of Gira manufacturer ads (company id **1412**) for live `temperature_c` / `setpoint_c`
-- `POST .../setpoint` via short-lived GATT write (lazy pair, idle disconnect)
-- YAML-configured thermostats; binds to `127.0.0.1:8787` by default
+- Passive scan of Gira manufacturer ads (company id **1412**) for live
+  `temperature_c` / `setpoint_c` and cover `position_pct`
+- `POST .../setpoint` and `POST .../covers/{id}/command` via short-lived GATT
+  write (lazy pair, idle disconnect)
+- YAML-configured thermostats and covers; binds to `127.0.0.1:8787` by default
 - Pure `protocol/` package (no Bleak/FastAPI) with unit tests — reusable as a
   reference for a future ESP32 firmware port
 
@@ -24,8 +26,8 @@ Gira 539403  ←BLE→  gira-ble-api (Bleak)  ←HTTP REST→  clients (curl / d
 
 - No Home Assistant / ESPHome bluetooth_proxy from this process
 - No dashboard UI in this repo
-- Shutters/sensors: protocol hooks only; not exposed in the REST API yet
-- No auth (LAN-only / reverse-proxy later — see Security)
+- Cover timer/astro programs, slat tilt, dimming/switch inserts, sensors: not yet
+- Auth is optional Bearer tokens (LAN-only / reverse-proxy later — see Security)
 
 ## Quick start (macOS)
 
@@ -50,6 +52,7 @@ Open another terminal:
 ```bash
 curl -s http://127.0.0.1:8787/health
 curl -s http://127.0.0.1:8787/thermostats | jq
+curl -s http://127.0.0.1:8787/covers | jq
 ```
 
 **Bluetooth permission:** the first time you run the scanner, macOS may prompt
@@ -103,7 +106,13 @@ thermostats:
   - id: living
     name: Wohnzimmer
     mac: "AA:BB:CC:DD:EE:FF"
+covers:
+  - id: living_blind
+    name: Wohnzimmer Jalousie
+    mac: "11:22:33:44:55:66"
 ```
+
+Ids and MAC addresses must be unique across thermostats and covers.
 
 | Key | Meaning |
 | --- | --- |
@@ -118,12 +127,18 @@ thermostats:
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{ "ok": true }` |
 | `GET` | `/discover?seconds=10` | — | Nearby Gira devices (blocks for the scan window) |
-| `GET` | `/thermostats` | — | List of configured devices + last known state |
-| `GET` | `/thermostats/{id}` | — | One device |
+| `GET` | `/thermostats` | — | List of configured thermostats + last known state |
+| `GET` | `/thermostats/{id}` | — | One thermostat |
 | `POST` | `/thermostats/{id}/setpoint` | `{ "celsius": 21.0 }` | Updated state on success |
+| `GET` | `/covers` | — | List of configured covers + last known state |
+| `GET` | `/covers/{id}` | — | One cover |
+| `POST` | `/covers/{id}/command` | `{ "action": "up"\|"down"\|"stop" }` **or** `{ "position": 0..100 }` | Updated state on success |
 
-State fields: `id`, `name`, `mac`, `online`, `paired`, `temperature_c`,
+Thermostat state fields: `id`, `name`, `mac`, `online`, `paired`, `temperature_c`,
 `setpoint_c`, `last_seen_at`, `updated_at`, `rssi`, optional `error`.
+
+Cover state fields: `id`, `name`, `mac`, `online`, `paired`, `position_pct`
+(0=closed … 100=open), `last_seen_at`, `updated_at`, `rssi`, optional `error`.
 
 `last_seen_at` is the timestamp of the last BLE advertisement from the device
 (null until the first ad). `updated_at` also moves on optimistic setpoint
@@ -156,6 +171,14 @@ After bonding, later setpoints usually work without pairing mode.
 curl -s -X POST http://127.0.0.1:8787/thermostats/living/setpoint \
   -H 'Content-Type: application/json' \
   -d '{"celsius": 21.0}'
+
+curl -s -X POST http://127.0.0.1:8787/covers/living_blind/command \
+  -H 'Content-Type: application/json' \
+  -d '{"action": "up"}'
+
+curl -s -X POST http://127.0.0.1:8787/covers/living_blind/command \
+  -H 'Content-Type: application/json' \
+  -d '{"position": 50}'
 ```
 
 Failures return clear 4xx/5xx JSON (`detail.error`, `detail.code`) for timeout,
@@ -216,14 +239,27 @@ curl -s -H "Authorization: Bearer dashboard-secret" http://127.0.0.1:8787/thermo
 `GET /health` stays open. Tokens are plaintext in config — use file mode `600`.
 Still HTTP (sniffable on LAN); add HTTPS / reverse proxy / Tailscale when needed.
 
-## Protocol notes (thermostat)
+## Protocol notes
+
+Shared:
 
 - Manufacturer ID: **1412** (`0x0584`)
+- GATT write characteristic: `97696341-F77A-43AE-8C35-09F0C5245308`
+
+Thermostat:
+
 - Actual temp ad prefix: `F7 01 41 01 FE 10 01` + u16 (dual-scale decode)
 - Setpoint ad prefix: `F7 00 65 01 FF 10 01` + u16
 - Setpoint write: `F6 00 65 01 F5 10 01` + u16 with
   `raw = round((21 + °C) * 50 + 1000)`
-- GATT write characteristic: `97696341-F77A-43AE-8C35-09F0C5245308`
+
+Cover (object `0x0320`):
+
+- Position ad prefix: `F7 03 20 01 F6 10 01` + PDT_SCALING byte
+  (`0x00` = open / 100%, `0xFF` = closed / 0%; API exposes percent open)
+- Move: `F6 03 20 01 FF 10 01` + `00` (up) / `01` (down)
+- Stop: `F6 03 20 01 FD 10 01 00`
+- Set position: `F6 03 20 01 FC 10 01` + raw byte
 
 ## Attribution
 
@@ -232,7 +268,7 @@ public discussion). This service reimplements parsing and commands cleanly and
 does **not** vendor Home Assistant entity or config-flow code.
 
 - [stho/gira-3000-bt](https://github.com/stho/gira-3000-bt) — thermostat climate + dual-scale decode (preferred)
-- [stho/girea-system-3000](https://github.com/stho/girea-system-3000) — shutters + `GIRA_SYSTEM_3000_BLUETOOTH.md`
+- [stho/girea-system-3000](https://github.com/stho/girea-system-3000) — covers/shutters + `GIRA_SYSTEM_3000_BLUETOOTH.md`
 - [HA community: Gira system 3000](https://community.home-assistant.io/t/gira-system-3000/490194) — advertisement layouts
 
 ## License

@@ -73,6 +73,17 @@ def test_auth_accepts_valid_bearer() -> None:
     assert len(ok.json()) == 1
 
 
+def test_auth_covers_routes() -> None:
+    client = _client("dashboard")
+    denied = client.get("/covers")
+    assert denied.status_code == 401
+    ok = client.get(
+        "/covers",
+        headers={"Authorization": "Bearer dashboard"},
+    )
+    assert ok.status_code == 200
+
+
 def test_auth_rejects_wrong_token() -> None:
     client = _client(["dashboard"])
     bad = client.get(

@@ -26,4 +26,22 @@ def test_format_row() -> None:
     assert "AA:BB:CC:DD:EE:FF" in text
     assert "thermostat" in text
     assert "21.00" in text
+    assert "POS%" in text
     assert "Copy ADDRESS" in text
+
+
+def test_format_cover_row() -> None:
+    devices = [
+        DiscoveredDevice(
+            address="11:22:33:44:55:66",
+            name="Blind",
+            rssi=-40,
+            position_pct=50,
+            kind_hints=["cover"],
+            ad_count=2,
+        )
+    ]
+    text = format_discovery_table(devices)
+    assert "11:22:33:44:55:66" in text
+    assert "cover" in text
+    assert "50" in text

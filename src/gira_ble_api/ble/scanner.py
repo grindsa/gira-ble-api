@@ -43,7 +43,7 @@ class BleScanner:
         await self._scanner.start()
         self._running = True
         logger.info(
-            "BLE scanner started; watching %d thermostat(s)",
+            "BLE scanner started; watching %d device(s)",
             len(self._macs),
         )
 
@@ -80,7 +80,7 @@ class BleScanner:
         if (
             update.temperature_c is None
             and update.setpoint_c is None
-            and update.shutter_position is None
+            and update.position_pct is None
         ):
             return
 

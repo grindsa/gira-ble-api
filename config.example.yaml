@@ -1,4 +1,4 @@
-# Copy to config.yaml and fill in your thermostat MAC addresses.
+# Copy to config.yaml and fill in your device MAC addresses.
 # Find MACs with the built-in scanner (no phone app needed):
 #   gira-ble-api scan
 # Stand near the device; press pairing briefly if it is quiet.
@@ -16,10 +16,10 @@ port: 8787
 # /health stays unauthenticated. Keep this file mode 600 on the Pi.
 api_tokens: ""
 
-# Seconds since last advertisement before a thermostat is considered offline.
+# Seconds since last advertisement before a device is considered offline.
 online_timeout_s: 120
 
-# BLE connect / write timeout for setpoint commands (macOS: allow time for Pair popup).
+# BLE connect / write timeout for commands (macOS: allow time for Pair popup).
 ble_timeout_s: 30
 
 # Keep GATT open briefly for rapid successive commands, then disconnect.
@@ -32,3 +32,11 @@ thermostats:
   # - id: bedroom
   #   name: Schlafzimmer
   #   mac: "11:22:33:44:55:66"
+
+# System 3000 BT covers (blinds / shutters / timers, e.g. 536727).
+# Position is percent open (0=closed, 100=open).
+# Ids and MACs must not collide with thermostats.
+covers:
+  # - id: living_blind
+  #   name: Wohnzimmer Jalousie
+  #   mac: "22:33:44:55:66:77"

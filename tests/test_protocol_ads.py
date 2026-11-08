@@ -45,15 +45,21 @@ def test_parse_unrelated_payload() -> None:
     update = parse_manufacturer_data(bytes.fromhex("0102030405"))
     assert update.temperature_c is None
     assert update.setpoint_c is None
-    assert update.shutter_position is None
+    assert update.position_pct is None
 
 
-def test_parse_shutter_hook() -> None:
-    # F7 03 20 01 F6 10 01 <pos> — position byte reserved for later covers
+def test_parse_cover_position() -> None:
+    # F7 03 20 01 F6 10 01 <raw> — raw 0x80 → ~50% open
     payload = bytes.fromhex("F7032001F61001" + "80")
     update = parse_manufacturer_data(payload)
-    assert update.shutter_position == 0x80
+    assert update.position_pct == 50
     assert update.temperature_c is None
+
+
+def test_parse_cover_position_open() -> None:
+    payload = bytes.fromhex("F7032001F61001" + "00")
+    update = parse_manufacturer_data(payload)
+    assert update.position_pct == 100
 
 
 def test_build_setpoint_command() -> None:

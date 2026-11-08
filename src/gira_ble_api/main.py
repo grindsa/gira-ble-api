@@ -56,7 +56,7 @@ def _with_default_serve(argv: list[str]) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gira-ble-api",
-        description="REST API / CLI for Gira System 3000 Bluetooth thermostats",
+        description="REST API / CLI for Gira System 3000 Bluetooth thermostats and covers",
     )
     parser.add_argument(
         "-v",
@@ -126,7 +126,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         logging.error(
             "No config found at %s. Copy config.example.yaml to config.yaml "
-            "and set thermostat MAC addresses. Tip: run `gira-ble-api scan` first.",
+            "and set device MAC addresses. Tip: run `gira-ble-api scan` first.",
             config_path,
         )
         return 1
@@ -138,14 +138,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     port = args.port or config.port
 
     logging.info(
-        "Loaded %s (%d thermostat(s)); binding %s:%d",
+        "Loaded %s (%d thermostat(s), %d cover(s)); binding %s:%d",
         config_path,
         len(config.thermostats),
+        len(config.covers),
         host,
         port,
     )
-    if not args.no_ble and not config.thermostats:
-        logging.warning("No thermostats configured — scanner will stay idle")
+    if not args.no_ble and not config.thermostats and not config.covers:
+        logging.warning("No devices configured — scanner will stay idle")
 
     from gira_ble_api.api import create_app
 

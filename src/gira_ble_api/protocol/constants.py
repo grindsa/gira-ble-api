@@ -9,7 +9,7 @@ from __future__ import annotations
 # Bluetooth SIG company identifier used in manufacturer advertisements.
 GIRA_MANUFACTURER_ID = 1412  # 0x0584
 
-# GATT service / characteristics used for commands (thermostat, shutters, …).
+# GATT service / characteristics used for commands (thermostat, covers, …).
 GIRA_SERVICE_UUID = "9769F147-F77A-43AE-8C35-09F0C5245308"
 GIRA_WRITE_CHAR_UUID = "97696341-F77A-43AE-8C35-09F0C5245308"
 GIRA_READ_CHAR_UUID = "9769C769-F77A-43AE-8C35-09F0C5245308"
@@ -40,7 +40,21 @@ THERMO_MIN_C = 5.0
 THERMO_MAX_C = 30.0
 THERMO_STEP_C = 0.5
 
-# Hooks for later device types (shutters / sensors) — prefixes only for now.
-SHUTTER_POS_PREFIX = bytes.fromhex("F7032001F61001")
+# Cover object id 0x0320 (800) — Gira protocol “shutter” object
+COVER_OBJECT_ID = bytes([0x03, 0x20])
+
+# Cover property IDs (write / status).
+COVER_PROPERTY_MOVE = 0xFF  # 0=up, 1=down
+COVER_PROPERTY_STOP = 0xFD
+COVER_PROPERTY_SET_POSITION = 0xFC  # absolute position (PDT_SCALING)
+# Ad status: current absolute position (read-only notify).
+COVER_POS_PREFIX = bytes.fromhex("F7032001F61001")
+
+# Position: API uses 0=closed … 100=open (HA cover convention).
+# Gira PDT_SCALING raw: 0x00 = open (100%), 0xFF = closed (0%).
+COVER_MIN_PCT = 0
+COVER_MAX_PCT = 100
+
+# Hooks for later device types (sensors) — prefixes only for now.
 SENSOR_TEMPERATURE_PREFIX = bytes.fromhex("F7019901FF1001")
 SENSOR_BRIGHTNESS_PREFIX = bytes.fromhex("F7019901FE1001")

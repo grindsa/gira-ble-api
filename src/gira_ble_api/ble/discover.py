@@ -27,7 +27,7 @@ class DiscoveredDevice:
     rssi: int | None = None
     temperature_c: float | None = None
     setpoint_c: float | None = None
-    shutter_position: int | None = None
+    position_pct: int | None = None
     last_seen_at: str | None = None
     ad_count: int = 0
     kind_hints: list[str] = field(default_factory=list)
@@ -44,13 +44,13 @@ def _hint_kinds(
     *,
     temperature_c: float | None,
     setpoint_c: float | None,
-    shutter_position: int | None,
+    position_pct: int | None,
 ) -> list[str]:
     hints: list[str] = []
     if temperature_c is not None or setpoint_c is not None:
         hints.append("thermostat")
-    if shutter_position is not None:
-        hints.append("shutter")
+    if position_pct is not None:
+        hints.append("cover")
     return hints
 
 
@@ -84,7 +84,7 @@ async def discover_gira_devices(*, seconds: float = 15.0) -> list[DiscoveredDevi
             hints = _hint_kinds(
                 temperature_c=update.temperature_c,
                 setpoint_c=update.setpoint_c,
-                shutter_position=update.shutter_position,
+                position_pct=update.position_pct,
             )
             found[address] = DiscoveredDevice(
                 address=address,
@@ -92,7 +92,7 @@ async def discover_gira_devices(*, seconds: float = 15.0) -> list[DiscoveredDevi
                 rssi=ad.rssi,
                 temperature_c=update.temperature_c,
                 setpoint_c=update.setpoint_c,
-                shutter_position=update.shutter_position,
+                position_pct=update.position_pct,
                 last_seen_at=now,
                 ad_count=1,
                 kind_hints=hints,
@@ -116,12 +116,12 @@ async def discover_gira_devices(*, seconds: float = 15.0) -> list[DiscoveredDevi
             existing.temperature_c = update.temperature_c
         if update.setpoint_c is not None:
             existing.setpoint_c = update.setpoint_c
-        if update.shutter_position is not None:
-            existing.shutter_position = update.shutter_position
+        if update.position_pct is not None:
+            existing.position_pct = update.position_pct
         for hint in _hint_kinds(
             temperature_c=update.temperature_c,
             setpoint_c=update.setpoint_c,
-            shutter_position=update.shutter_position,
+            position_pct=update.position_pct,
         ):
             if hint not in existing.kind_hints:
                 existing.kind_hints.append(hint)
@@ -153,7 +153,7 @@ def format_discovery_table(devices: list[DiscoveredDevice]) -> str:
             "a longer --seconds."
         )
 
-    headers = ("ADDRESS", "RSSI", "NAME", "TEMP°C", "SETPOINT°C", "HINTS", "ADS")
+    headers = ("ADDRESS", "RSSI", "NAME", "TEMP°C", "SETPOINT°C", "POS%", "HINTS", "ADS")
     rows: list[tuple[str, ...]] = [headers]
     for d in devices:
         rows.append(
@@ -163,6 +163,7 @@ def format_discovery_table(devices: list[DiscoveredDevice]) -> str:
                 d.name or "-",
                 f"{d.temperature_c:.2f}" if d.temperature_c is not None else "-",
                 f"{d.setpoint_c:.2f}" if d.setpoint_c is not None else "-",
+                str(d.position_pct) if d.position_pct is not None else "-",
                 ",".join(d.kind_hints) or "gira",
                 str(d.ad_count),
             )

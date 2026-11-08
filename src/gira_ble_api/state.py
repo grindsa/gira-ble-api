@@ -1,12 +1,13 @@
-"""In-memory thermostat state merged from advertisements and commands."""
+"""In-memory device state merged from advertisements and commands."""
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Literal
 
-from gira_ble_api.config import ThermostatConfig
+from gira_ble_api.config import CoverConfig, ThermostatConfig
 from gira_ble_api.protocol.ads import AdvertisementUpdate
 
 
@@ -54,9 +55,49 @@ class ThermostatState:
 
 
 @dataclass
+class CoverState:
+    id: str
+    name: str
+    mac: str
+    position_pct: int | None = None
+    last_seen_at: datetime | None = None
+    updated_at: datetime | None = None
+    rssi: int | None = None
+    error: str | None = None
+
+    def to_dict(
+        self,
+        *,
+        online_timeout_s: float,
+        paired: bool | None = None,
+    ) -> dict:
+        now = _utcnow()
+        online = False
+        if self.last_seen_at is not None:
+            online = (now - self.last_seen_at).total_seconds() <= online_timeout_s
+        return {
+            "id": self.id,
+            "name": self.name,
+            "mac": self.mac,
+            "online": online,
+            "paired": paired,
+            "position_pct": self.position_pct,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "rssi": self.rssi,
+            "error": self.error,
+        }
+
+
+Kind = Literal["thermostat", "cover"]
+
+
+@dataclass
 class DeviceStore:
     online_timeout_s: float
-    _by_id: dict[str, ThermostatState] = field(default_factory=dict)
+    _thermostats: dict[str, ThermostatState] = field(default_factory=dict)
+    _covers: dict[str, CoverState] = field(default_factory=dict)
+    _mac_to_kind: dict[str, Kind] = field(default_factory=dict)
     _mac_to_id: dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -65,18 +106,26 @@ class DeviceStore:
         cls,
         thermostats: list[ThermostatConfig],
         *,
+        covers: list[CoverConfig] | None = None,
         online_timeout_s: float,
     ) -> DeviceStore:
         store = cls(online_timeout_s=online_timeout_s)
         for t in thermostats:
-            store._by_id[t.id] = ThermostatState(id=t.id, name=t.name, mac=t.mac)
+            store._thermostats[t.id] = ThermostatState(id=t.id, name=t.name, mac=t.mac)
             store._mac_to_id[t.mac.upper()] = t.id
+            store._mac_to_kind[t.mac.upper()] = "thermostat"
+        for c in covers or []:
+            store._covers[c.id] = CoverState(id=c.id, name=c.name, mac=c.mac)
+            store._mac_to_id[c.mac.upper()] = c.id
+            store._mac_to_kind[c.mac.upper()] = "cover"
         return store
 
-    def list(self, *, paired_by_mac: dict[str, bool | None] | None = None) -> list[dict]:
+    def list_thermostats(
+        self, *, paired_by_mac: dict[str, bool | None] | None = None
+    ) -> list[dict]:
         with self._lock:
             out: list[dict] = []
-            for s in self._by_id.values():
+            for s in self._thermostats.values():
                 paired = None
                 if paired_by_mac is not None:
                     paired = paired_by_mac.get(s.mac)
@@ -85,6 +134,24 @@ class DeviceStore:
                 )
             return out
 
+    def list_covers(
+        self, *, paired_by_mac: dict[str, bool | None] | None = None
+    ) -> list[dict]:
+        with self._lock:
+            out: list[dict] = []
+            for s in self._covers.values():
+                paired = None
+                if paired_by_mac is not None:
+                    paired = paired_by_mac.get(s.mac)
+                out.append(
+                    s.to_dict(online_timeout_s=self.online_timeout_s, paired=paired)
+                )
+            return out
+
+    # Back-compat alias used by older call sites / tests.
+    def list(self, *, paired_by_mac: dict[str, bool | None] | None = None) -> list[dict]:
+        return self.list_thermostats(paired_by_mac=paired_by_mac)
+
     def get(
         self,
         thermostat_id: str,
@@ -92,7 +159,22 @@ class DeviceStore:
         paired: bool | None = None,
     ) -> dict | None:
         with self._lock:
-            state = self._by_id.get(thermostat_id)
+            state = self._thermostats.get(thermostat_id)
+            if state is None:
+                return None
+            return state.to_dict(
+                online_timeout_s=self.online_timeout_s,
+                paired=paired,
+            )
+
+    def get_cover(
+        self,
+        cover_id: str,
+        *,
+        paired: bool | None = None,
+    ) -> dict | None:
+        with self._lock:
+            state = self._covers.get(cover_id)
             if state is None:
                 return None
             return state.to_dict(
@@ -102,7 +184,12 @@ class DeviceStore:
 
     def get_mac(self, thermostat_id: str) -> str | None:
         with self._lock:
-            state = self._by_id.get(thermostat_id)
+            state = self._thermostats.get(thermostat_id)
+            return state.mac if state else None
+
+    def get_cover_mac(self, cover_id: str) -> str | None:
+        with self._lock:
+            state = self._covers.get(cover_id)
             return state.mac if state else None
 
     def apply_advertisement(
@@ -112,33 +199,63 @@ class DeviceStore:
         rssi: int | None = None,
     ) -> None:
         with self._lock:
-            tid = self._mac_to_id.get(mac.upper())
-            if tid is None:
+            key = mac.upper()
+            kind = self._mac_to_kind.get(key)
+            device_id = self._mac_to_id.get(key)
+            if kind is None or device_id is None:
                 return
-            state = self._by_id[tid]
             now = _utcnow()
-            state.last_seen_at = now
-            state.updated_at = now
-            state.error = None
+            if kind == "thermostat":
+                state = self._thermostats[device_id]
+                state.last_seen_at = now
+                state.updated_at = now
+                state.error = None
+                if rssi is not None:
+                    state.rssi = rssi
+                if update.temperature_c is not None:
+                    state.temperature_c = update.temperature_c
+                if update.setpoint_c is not None:
+                    state.setpoint_c = update.setpoint_c
+                return
+
+            state_c = self._covers[device_id]
+            state_c.last_seen_at = now
+            state_c.updated_at = now
+            state_c.error = None
             if rssi is not None:
-                state.rssi = rssi
-            if update.temperature_c is not None:
-                state.temperature_c = update.temperature_c
-            if update.setpoint_c is not None:
-                state.setpoint_c = update.setpoint_c
+                state_c.rssi = rssi
+            if update.position_pct is not None:
+                state_c.position_pct = update.position_pct
 
     def set_setpoint_optimistic(self, thermostat_id: str, setpoint_c: float) -> None:
         with self._lock:
-            state = self._by_id.get(thermostat_id)
+            state = self._thermostats.get(thermostat_id)
             if state is None:
                 return
             state.setpoint_c = setpoint_c
             state.updated_at = _utcnow()
             state.error = None
 
+    def set_position_optimistic(self, cover_id: str, position_pct: int) -> None:
+        with self._lock:
+            state = self._covers.get(cover_id)
+            if state is None:
+                return
+            state.position_pct = position_pct
+            state.updated_at = _utcnow()
+            state.error = None
+
     def set_error(self, thermostat_id: str, message: str) -> None:
         with self._lock:
-            state = self._by_id.get(thermostat_id)
+            state = self._thermostats.get(thermostat_id)
+            if state is None:
+                return
+            state.error = message
+            state.updated_at = _utcnow()
+
+    def set_cover_error(self, cover_id: str, message: str) -> None:
+        with self._lock:
+            state = self._covers.get(cover_id)
             if state is None:
                 return
             state.error = message

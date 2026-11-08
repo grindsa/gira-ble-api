@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from gira_ble_api.ble.client import normalize_mac
 
@@ -46,6 +46,25 @@ class ThermostatConfig(BaseModel):
         return cleaned
 
 
+class CoverConfig(BaseModel):
+    id: str
+    name: str
+    mac: str
+
+    @field_validator("mac")
+    @classmethod
+    def _norm_mac(cls, value: str) -> str:
+        return normalize_mac(value)
+
+    @field_validator("id")
+    @classmethod
+    def _non_empty_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("cover id must not be empty")
+        return cleaned
+
+
 class AppConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8787
@@ -55,6 +74,7 @@ class AppConfig(BaseModel):
     # Empty / omitted → no auth. Comma-separated string or YAML list of Bearer tokens.
     api_tokens: list[str] = Field(default_factory=list)
     thermostats: list[ThermostatConfig] = Field(default_factory=list)
+    covers: list[CoverConfig] = Field(default_factory=list)
 
     @field_validator("api_tokens", mode="before")
     @classmethod
@@ -63,7 +83,7 @@ class AppConfig(BaseModel):
 
     @field_validator("thermostats")
     @classmethod
-    def _unique_ids(cls, value: list[ThermostatConfig]) -> list[ThermostatConfig]:
+    def _unique_thermostats(cls, value: list[ThermostatConfig]) -> list[ThermostatConfig]:
         ids = [t.id for t in value]
         if len(ids) != len(set(ids)):
             raise ValueError("thermostat ids must be unique")
@@ -71,6 +91,37 @@ class AppConfig(BaseModel):
         if len(macs) != len(set(macs)):
             raise ValueError("thermostat mac addresses must be unique")
         return value
+
+    @field_validator("covers")
+    @classmethod
+    def _unique_covers(cls, value: list[CoverConfig]) -> list[CoverConfig]:
+        ids = [c.id for c in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("cover ids must be unique")
+        macs = [c.mac for c in value]
+        if len(macs) != len(set(macs)):
+            raise ValueError("cover mac addresses must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def _unique_across_device_types(self) -> AppConfig:
+        thermo_ids = {t.id for t in self.thermostats}
+        cover_ids = {c.id for c in self.covers}
+        overlap_ids = thermo_ids & cover_ids
+        if overlap_ids:
+            raise ValueError(
+                f"device ids must be unique across thermostats and covers: "
+                f"{sorted(overlap_ids)}"
+            )
+        thermo_macs = {t.mac for t in self.thermostats}
+        cover_macs = {c.mac for c in self.covers}
+        overlap_macs = thermo_macs & cover_macs
+        if overlap_macs:
+            raise ValueError(
+                f"mac addresses must be unique across thermostats and covers: "
+                f"{sorted(overlap_macs)}"
+            )
+        return self
 
 
 def load_config(path: str | Path) -> AppConfig:
