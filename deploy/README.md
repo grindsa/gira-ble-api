@@ -43,36 +43,51 @@ journalctl -u gira-ble-api -f
 
 ## First-time BLE pairing (BlueZ / Pi)
 
-`AuthenticationCanceled` from Bleak usually means BlueZ had no pairing agent.
-Bond each thermostat once while it is in **pairing mode**.
-
-Helper script (MAC only):
+Gira thermostats/covers request **User Confirm** (often passkey `000000`).
+`agent NoInputNoOutput` → `AuthenticationCanceled`. Prefer the helper script
+(auto-confirms via `btmgmt`).
 
 ```bash
 sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair \
   /usr/local/bin/gira-ble-pair
 
-# 1) Thermostat: menu → Bluetooth → YES (icon blinks)
+# 1) Device: pairing mode (thermostat BT icon / cover blue LED blinking)
 # 2) Pi:
 sudo gira-ble-pair C7:F5:40:A6:81:66
+sudo gira-ble-pair -s 30 C7:F5:40:A6:81:66   # longer scan window
 ```
 
-Manual equivalent:
+Manual equivalent (`DisplayYesNo` + type `yes` when asked):
 
 ```bash
 sudo bluetoothctl
 power on
-agent NoInputNoOutput
+pairable on
+agent DisplayYesNo
 default-agent
 scan on
 pair C7:F5:40:A6:81:66
+# Confirm passkey → yes
 trust C7:F5:40:A6:81:66
-connect C7:F5:40:A6:81:66
 quit
 ```
 
+Or one-shot with `btmgmt` (same as the helper):
+
+```bash
+# Terminal A — start confirmer in background:
+sudo bash -c 'for i in $(seq 1 60); do btmgmt user-confirm-reply -p 1 C7:F5:40:A6:81:66 && break; sleep 0.25; done' &
+
+# Terminal B — while device LED is blinking:
+sudo btmgmt power on
+sudo btmgmt connectable on
+sudo btmgmt bondable on
+sudo btmgmt pair -c 1 -t 2 C7:F5:40:A6:81:66
+sudo bluetoothctl trust C7:F5:40:A6:81:66
+```
+
 Clear a bad bond: `sudo bluetoothctl remove C7:F5:40:A6:81:66`  
-Then retry the API setpoint (pairing mode usually not needed after a successful bond).
+Then retry the API command (pairing mode usually not needed after a successful bond).
 
 ## Updates
 
