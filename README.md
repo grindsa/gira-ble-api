@@ -150,20 +150,47 @@ writes and errors — use `last_seen_at` for “when did we last hear from it?�
 
 ### Setpoint / pairing
 
-Temperature is read from **passive advertisements** (no pairing required).
+Temperature / cover position are read from **passive advertisements** (no
+pairing required). Commands need a **GATT connection** and a one-time OS bond.
 
-Setting the setpoint requires a **GATT connection**. The service **pauses** the
-passive scanner while connecting (required for reliable connects on macOS).
+#### Raspberry Pi / Linux (recommended): `gira-ble-pair-agent`
 
-On **first use** (especially on Mac):
+Gira units often need User Confirm during bonding. Plain `bluetoothctl` /
+`NoInputNoOutput` frequently fails with `AuthenticationCanceled`. Use the
+D-Bus agent that discovers the MAC, auto-confirms, and calls `Pair()`:
 
-1. Put the thermostat into **pairing mode** (menu → Bluetooth → YES; BT icon blinks).
-2. Send the setpoint request immediately.
-3. On macOS, watch for a **system Bluetooth pairing popup** and click **Pair** —
-   Bleak cannot pair programmatically; the first encrypted GATT write triggers it.
+```bash
+sudo apt install -y python3-dbus python3-gi
+sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair-agent \
+  /usr/local/bin/gira-ble-pair-agent
+
+sudo systemctl stop gira-ble-api
+
+# Thermostat: menu → Bluetooth → YES (icon blinks)
+# Cover: hold ↑+↓ until blue LED blinks
+# Stand close (aim for RSSI better than about -80), then:
+sudo gira-ble-pair-agent -s 40 AA:BB:CC:DD:EE:FF
+```
+
+Success looks like `Paired=True` / `Bonded=True` (optional `AUTO-CONFIRM` line).
+Verify with `bluetoothctl info AA:BB:CC:DD:EE:FF`, then:
+
+```bash
+sudo systemctl start gira-ble-api
+```
+
+Weak RSSI (e.g. -95 or worse) makes bonding and later GATT writes unreliable —
+move the Pi / dongle closer. Full notes: [`deploy/README.md`](deploy/README.md).
+
+#### macOS
+
+1. Put the device into **pairing mode**.
+2. Send a command immediately (setpoint or cover command).
+3. Accept the **system Bluetooth pairing popup** — Bleak cannot pair
+   programmatically; the first encrypted GATT write triggers it.
 4. Stay near the device; expect up to ~30–60s with retries.
 
-After bonding, later setpoints usually work without pairing mode.
+After bonding, later commands usually work without pairing mode.
 
 ```bash
 # Put device in pairing mode first (first time only)

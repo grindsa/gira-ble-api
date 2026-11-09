@@ -43,62 +43,59 @@ journalctl -u gira-ble-api -f
 
 ## First-time BLE pairing (BlueZ / Pi)
 
-Gira thermostats/covers request **User Confirm** (often passkey `000000`).
-`agent NoInputNoOutput` → `AuthenticationCanceled`. Prefer the helper script
-(drives `bluetoothctl` + `expect` and auto-sends `yes`).
+**Recommended:** [`gira-ble-pair-agent`](gira-ble-pair-agent) — registers a BlueZ
+`DisplayYesNo` agent, removes any stale device cache entry, discovers the MAC,
+auto-confirms User Confirm / passkey, and calls async `Pair()`.
 
-Many Pi BlueZ builds **do not** have `btmgmt user-confirm-reply`
-(`Invalid command in menu mgmt`) — do not use that one-liner.
+Plain `bluetoothctl` with `agent NoInputNoOutput` often fails with
+`AuthenticationCanceled`. Many Pi BlueZ builds also lack
+`btmgmt user-confirm-reply`. Do **not** run two `bluetoothctl` sessions
+(scan in one, pair in another) — that frequently cancels auth.
 
-```bash
-sudo apt install -y expect   # once
-sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair \
-  /usr/local/bin/gira-ble-pair
-
-# 1) Device: pairing mode (thermostat BT icon / cover blue LED blinking)
-# 2) Pi (press Enter as soon as the LED blinks):
-sudo gira-ble-pair C7:F5:40:A6:81:66
-sudo gira-ble-pair -s 30 C7:F5:40:A6:81:66   # longer scan window
-```
-
-If `bluetoothctl` fails with `AuthenticationCanceled` and never shows
-`[agent] Confirm passkey`, use the D-Bus auto-confirm agent (recommended on
-Pi). **Do not** run two `bluetoothctl` sessions (scan+pair) — that often
-cancels auth.
+### One-shot (reliable)
 
 ```bash
 sudo apt install -y python3-dbus python3-gi
 sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair-agent \
   /usr/local/bin/gira-ble-pair-agent
 
-# Terminal 1:
 sudo systemctl stop gira-ble-api
-sudo gira-ble-pair-agent
-# leave running — should print "Agent registered"
 
-# Terminal 2 (device LED blinking):
-sudo bluetoothctl remove C7:F5:40:A6:81:66
-sudo bluetoothctl
-power on
-pairable on
-scan on
-# wait until `devices` shows the MAC, then:
-pair C7:F5:40:A6:81:66
-trust C7:F5:40:A6:81:66
-info C7:F5:40:A6:81:66
-# expect Paired: yes — Terminal 1 should log AUTO-CONFIRM
-quit
+# Device in pairing mode (thermostat BT icon / cover blue LED blinking).
+# Stand close — RSSI should be better than about -80 (worse than -90 is flaky).
+sudo gira-ble-pair-agent -s 40 C7:F5:40:A6:81:66
 ```
 
-To watch for a MAC without a second `bluetoothctl scan` (poll only):
+Success looks like:
+
+```text
+Found C7:F5:40:A6:81:66 … RSSI=-65
+Calling async Pair() …
+AUTO-CONFIRM …          # optional; some units bond without this line
+Pair() completed
+Result: Paired=True Bonded=True …
+OK: …
+```
+
+Verify and restart:
 
 ```bash
-MAC=C7:F5:40:A6:81:66
-watch -n1 "bluetoothctl devices | grep -i $MAC || true"
+bluetoothctl info C7:F5:40:A6:81:66   # Paired: yes
+sudo systemctl start gira-ble-api
+# then POST /thermostats/…/setpoint or /covers/…/command
 ```
 
-Clear a bad bond: `sudo bluetoothctl remove C7:F5:40:A6:81:66`  
-Then retry the API command (pairing mode usually not needed after a successful bond).
+Clear a bad bond before retrying:
+
+```bash
+sudo bluetoothctl remove C7:F5:40:A6:81:66
+```
+
+### Manual fallback
+
+If needed, use a single `bluetoothctl` session with `agent DisplayYesNo` and
+type `yes` only on the `[agent] Confirm passkey…` prompt (not at the main
+`[bluetoothctl]>` prompt). Prefer `gira-ble-pair-agent` instead.
 
 ## Updates
 
