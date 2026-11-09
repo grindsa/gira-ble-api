@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""BlueZ Agent1 that auto-accepts Gira User Confirm / passkey prompts.
+
+Run as root in its own terminal while pairing with bluetoothctl:
+
+  sudo gira-ble-pair-agent
+
+Then in another terminal use bluetoothctl (agent already provided by this
+process — do NOT register a second agent there):
+
+  sudo bluetoothctl
+  power on
+  pairable on
+  scan on
+  pair AA:BB:CC:DD:EE:FF
+  trust AA:BB:CC:DD:EE:FF
+
+Ctrl-C to stop the agent when done.
+"""
+
+from __future__ import annotations
+
+import sys
+
+try:
+    import dbus
+    import dbus.mainloop.glib
+    import dbus.service
+    from gi.repository import GLib
+except ImportError as exc:  # pragma: no cover
+    print(
+        "Missing Python deps. Install with:\n"
+        "  sudo apt install -y python3-dbus python3-gi\n"
+        f"({exc})",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+BUS_NAME = "org.bluez"
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_MANAGER_IFACE = "org.bluez.AgentManager1"
+AGENT_PATH = "/org/bluez/gira_ble_pair_agent"
+CAPABILITY = "DisplayYesNo"
+
+
+class Agent(dbus.service.Object):
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pincode):
+        print(f"DisplayPinCode {device} pin={pincode}", flush=True)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+    def DisplayPasskey(self, device, passkey):
+        print(f"DisplayPasskey {device} passkey={passkey:06d}", flush=True)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        print(f"AUTO-CONFIRM {device} passkey={passkey:06d}", flush=True)
+        # Returning without error = accept
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        print(f"RequestPinCode {device} -> 0000", flush=True)
+        return "0000"
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        print(f"RequestPasskey {device} -> 0", flush=True)
+        return dbus.UInt32(0)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        print(f"AuthorizeService {device} uuid={uuid}", flush=True)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Cancel(self):
+        print("Cancel", flush=True)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Release(self):
+        print("Release", flush=True)
+
+
+def main() -> int:
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    agent = Agent(bus, AGENT_PATH)  # noqa: F841 — must stay referenced
+    manager = dbus.Interface(
+        bus.get_object(BUS_NAME, "/org/bluez"),
+        AGENT_MANAGER_IFACE,
+    )
+    try:
+        manager.RegisterAgent(AGENT_PATH, CAPABILITY)
+        manager.RequestDefaultAgent(AGENT_PATH)
+    except dbus.exceptions.DBusException as exc:
+        print(f"Failed to register agent: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Agent registered ({CAPABILITY}) at {AGENT_PATH}.\n"
+        "Now pair with bluetoothctl in another terminal "
+        "(do NOT run 'agent …' there).\n"
+        "Ctrl-C when finished.",
+        flush=True,
+    )
+    loop = GLib.MainLoop()
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        print("\nStopping agent…", flush=True)
+    try:
+        manager.UnregisterAgent(AGENT_PATH)
+    except dbus.exceptions.DBusException:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,15 +7,14 @@
 #
 # Put the device into pairing mode (BT / blue LED blinking) BEFORE / when prompted.
 #
-# Gira thermostats and covers request User Confirm (often passkey 000000).
-# NoInputNoOutput fails with AuthenticationCanceled — we use DisplayYesNo
-# capability and auto-accept via btmgmt user-confirm-reply.
+# Gira units request User Confirm (often passkey 000000). We drive bluetoothctl
+# via expect with agent DisplayYesNo and auto-send "yes".
+# (Older BlueZ builds lack `btmgmt user-confirm-reply`.)
 
 set -euo pipefail
 
 DEFAULT_SCAN_SECONDS=20
 SCAN_SECONDS="${GIRA_BLE_PAIR_SCAN_SECONDS:-$DEFAULT_SCAN_SECONDS}"
-CONFIRM_TRIES="${GIRA_BLE_PAIR_CONFIRM_TRIES:-60}"
 STOP_SERVICE="${GIRA_BLE_PAIR_STOP_SERVICE:-1}"
 SERVICE_NAME="${GIRA_BLE_SERVICE:-gira-ble-api}"
 FORCE_PAIR=0
@@ -31,13 +30,14 @@ Options:
   -f, --force       Pair even if the MAC was not seen during scan
   -h, --help        Show this help
 
+Requires: bluetoothctl, expect  (sudo apt install expect)
+
 Example:
   sudo $(basename "$0") C7:F5:40:A6:81:66
   sudo $(basename "$0") -s 30 C7:F5:40:A6:81:66
 
 Env (overridden by flags when set):
   GIRA_BLE_PAIR_SCAN_SECONDS    discover window (default ${DEFAULT_SCAN_SECONDS})
-  GIRA_BLE_PAIR_CONFIRM_TRIES   confirm poll attempts (default ${CONFIRM_TRIES})
   GIRA_BLE_PAIR_STOP_SERVICE    stop ${SERVICE_NAME} during pair (default 1)
 EOF
 }
@@ -62,10 +62,6 @@ is_paired() {
 }
 
 cleanup() {
-  if [[ -n "${CONFIRMER_PID:-}" ]]; then
-    kill "${CONFIRMER_PID}" >/dev/null 2>&1 || true
-    wait "${CONFIRMER_PID}" 2>/dev/null || true
-  fi
   bluetoothctl scan off >/dev/null 2>&1 || true
   if [[ "${SERVICE_WAS_ACTIVE:-0}" -eq 1 ]]; then
     echo "==> Restarting ${SERVICE_NAME}"
@@ -135,8 +131,8 @@ if ! command -v bluetoothctl >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v btmgmt >/dev/null 2>&1; then
-  echo "btmgmt not found (install bluez)." >&2
+if ! command -v expect >/dev/null 2>&1; then
+  echo "expect not found. Install with: sudo apt install expect" >&2
   exit 1
 fi
 
@@ -162,14 +158,17 @@ read -r _
 echo "==> Removing any previous bond"
 bluetoothctl remove "${MAC}" >/dev/null 2>&1 || true
 
-echo "==> Adapter: power / connectable / bondable"
-btmgmt power on >/dev/null
-btmgmt connectable on >/dev/null
-btmgmt bondable on >/dev/null
+if command -v btmgmt >/dev/null 2>&1; then
+  echo "==> Adapter: power / connectable / bondable"
+  btmgmt power on >/dev/null 2>&1 || true
+  btmgmt connectable on >/dev/null 2>&1 || true
+  btmgmt bondable on >/dev/null 2>&1 || true
+else
+  bluetoothctl power on >/dev/null 2>&1 || true
+fi
 
-echo "==> Scanning up to ${SCAN_SECONDS}s (exits early when ${MAC} appears;"
-echo "    scan stays on through pair). Start pairing mode, then press Enter"
-echo "    immediately — Gira windows are often shorter than a long -s."
+echo "==> Scanning up to ${SCAN_SECONDS}s (exits early when ${MAC} appears)."
+echo "    Press Enter as soon as the LED blinks — Gira windows are short."
 
 if ! bluetoothctl scan on >/dev/null 2>&1; then
   echo "ERROR: 'bluetoothctl scan on' failed. Is bluetoothd running?" >&2
@@ -200,49 +199,68 @@ if [[ "${SEEN}" -ne 1 ]]; then
     echo "  Nearby devices BlueZ did see:" >&2
     bluetoothctl devices 2>/dev/null | sed 's/^/    /' >&2 || echo "    (none)" >&2
     echo "  - Re-enter pairing mode and press Enter as soon as LED blinks" >&2
-    echo "  - Confirm MAC with: gira-ble-api scan  (or bluetoothctl scan on)" >&2
+    echo "  - Confirm MAC with: gira-ble-api scan" >&2
     echo "  - Stand closer; forget phone/Gira-app bond for this unit" >&2
-    echo "  - Do NOT kill bluetoothd — only stop ${SERVICE_NAME}" >&2
-    echo "  - --force usually still fails if the unit is not advertising" >&2
     exit 1
   fi
 fi
 
-echo "==> Starting User Confirm auto-acceptor"
-# Gira units prompt User Confirm 000000; accept as soon as BlueZ asks.
-(
-  for _ in $(seq 1 "${CONFIRM_TRIES}"); do
-    if btmgmt user-confirm-reply -p 1 "${MAC}" >/dev/null 2>&1; then
-      echo "==> Confirmed pairing for ${MAC}"
-      exit 0
-    fi
-    sleep 0.25
-  done
-  exit 0
-) &
-CONFIRMER_PID=$!
-
-echo "==> Pair ${MAC} (LE Random, DisplayYesNo) — keep pairing mode active"
+# Pair + auto-yes via expect (works without btmgmt user-confirm-reply).
+PAIR_LOG="$(mktemp /tmp/gira-ble-pair.XXXXXX)"
+echo "==> Pair ${MAC} (bluetoothctl DisplayYesNo + auto-yes)"
 set +e
-PAIR_OUT="$(btmgmt pair -c 1 -t 2 "${MAC}" 2>&1)"
+expect <<EOF >"${PAIR_LOG}" 2>&1
+set timeout 60
+log_user 1
+spawn bluetoothctl
+expect -re {# |> }
+send "power on\r"
+expect -re {# |> }
+send "pairable on\r"
+expect -re {# |> }
+send "agent off\r"
+expect -re {# |> }
+send "agent DisplayYesNo\r"
+expect -re {# |> }
+send "default-agent\r"
+expect -re {# |> }
+send "pair ${MAC}\r"
+expect {
+  -re {Confirm passkey|Request confirmation|Authorize service|Confirm value} {
+    send "yes\r"
+    exp_continue
+  }
+  -re {Pairing successful|AlreadyExists|Already Paired} { }
+  -re {Failed to pair|AuthenticationCanceled|Authentication Failed} {
+    puts "PAIR_FAILED"
+    exit 1
+  }
+  timeout {
+    puts "PAIR_TIMEOUT"
+    exit 1
+  }
+  eof {
+    puts "PAIR_EOF"
+    exit 1
+  }
+}
+send "trust ${MAC}\r"
+expect -re {# |> }
+send "quit\r"
+expect eof
+EOF
 PAIR_RC=$?
 set -e
-printf '%s\n' "${PAIR_OUT}"
+
+cat "${PAIR_LOG}"
+rm -f "${PAIR_LOG}"
 
 bluetoothctl scan off >/dev/null 2>&1 || true
 
-# Give confirmer a moment to finish if pair returned quickly.
-sleep 1
-kill "${CONFIRMER_PID}" >/dev/null 2>&1 || true
-wait "${CONFIRMER_PID}" 2>/dev/null || true
-CONFIRMER_PID=""
-
-echo "==> Trust ${MAC}"
+echo "==> Trust ${MAC} (idempotent)"
 bluetoothctl trust "${MAC}" >/dev/null 2>&1 || true
 
-if is_paired || bluetoothctl devices Paired 2>/dev/null | grep -qi "${MAC}"; then
-  : # skip connect probe when already paired
-else
+if ! is_paired && ! bluetoothctl devices Paired 2>/dev/null | grep -qi "${MAC}"; then
   echo "==> Connect (optional verification)"
   set +e
   CONN_OUT="$(bluetoothctl connect "${MAC}" 2>&1)"
@@ -261,16 +279,11 @@ echo "==> Device info:"
 bluetoothctl info "${MAC}" || true
 echo
 
-if is_paired; then
+if is_paired || bluetoothctl devices Paired 2>/dev/null | grep -qi "${MAC}"; then
   echo "OK: ${MAC} is paired. Retry API command now."
   exit 0
 fi
 
-if bluetoothctl devices Paired 2>/dev/null | grep -qi "${MAC}"; then
-  echo "OK: ${MAC} listed under devices Paired."
-  exit 0
-fi
-
-echo "ERROR: ${MAC} does not look paired (btmgmt rc=${PAIR_RC})." >&2
+echo "ERROR: ${MAC} does not look paired (expect rc=${PAIR_RC})." >&2
 echo "Tips: closer to Pi, pairing mode active, forget phone/Gira-app bond, retry." >&2
 exit 1

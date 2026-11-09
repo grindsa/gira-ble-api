@@ -45,45 +45,56 @@ journalctl -u gira-ble-api -f
 
 Gira thermostats/covers request **User Confirm** (often passkey `000000`).
 `agent NoInputNoOutput` → `AuthenticationCanceled`. Prefer the helper script
-(auto-confirms via `btmgmt`).
+(drives `bluetoothctl` + `expect` and auto-sends `yes`).
+
+Many Pi BlueZ builds **do not** have `btmgmt user-confirm-reply`
+(`Invalid command in menu mgmt`) — do not use that one-liner.
 
 ```bash
+sudo apt install -y expect   # once
 sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair \
   /usr/local/bin/gira-ble-pair
 
 # 1) Device: pairing mode (thermostat BT icon / cover blue LED blinking)
-# 2) Pi:
+# 2) Pi (press Enter as soon as the LED blinks):
 sudo gira-ble-pair C7:F5:40:A6:81:66
 sudo gira-ble-pair -s 30 C7:F5:40:A6:81:66   # longer scan window
 ```
 
-Manual equivalent (`DisplayYesNo` + type `yes` when asked):
+If `bluetoothctl` fails with `AuthenticationCanceled` and never shows
+`[agent] Confirm passkey`, use the D-Bus auto-confirm agent (recommended on
+Pi). **Do not** run two `bluetoothctl` sessions (scan+pair) — that often
+cancels auth.
 
 ```bash
+sudo apt install -y python3-dbus python3-gi
+sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-pair-agent \
+  /usr/local/bin/gira-ble-pair-agent
+
+# Terminal 1:
+sudo systemctl stop gira-ble-api
+sudo gira-ble-pair-agent
+# leave running — should print "Agent registered"
+
+# Terminal 2 (device LED blinking):
+sudo bluetoothctl remove C7:F5:40:A6:81:66
 sudo bluetoothctl
 power on
 pairable on
-agent DisplayYesNo
-default-agent
 scan on
+# wait until `devices` shows the MAC, then:
 pair C7:F5:40:A6:81:66
-# Confirm passkey → yes
 trust C7:F5:40:A6:81:66
+info C7:F5:40:A6:81:66
+# expect Paired: yes — Terminal 1 should log AUTO-CONFIRM
 quit
 ```
 
-Or one-shot with `btmgmt` (same as the helper):
+To watch for a MAC without a second `bluetoothctl scan` (poll only):
 
 ```bash
-# Terminal A — start confirmer in background:
-sudo bash -c 'for i in $(seq 1 60); do btmgmt user-confirm-reply -p 1 C7:F5:40:A6:81:66 && break; sleep 0.25; done' &
-
-# Terminal B — while device LED is blinking:
-sudo btmgmt power on
-sudo btmgmt connectable on
-sudo btmgmt bondable on
-sudo btmgmt pair -c 1 -t 2 C7:F5:40:A6:81:66
-sudo bluetoothctl trust C7:F5:40:A6:81:66
+MAC=C7:F5:40:A6:81:66
+watch -n1 "bluetoothctl devices | grep -i $MAC || true"
 ```
 
 Clear a bad bond: `sudo bluetoothctl remove C7:F5:40:A6:81:66`  
