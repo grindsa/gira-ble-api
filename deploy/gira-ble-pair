@@ -18,6 +18,7 @@ SCAN_SECONDS="${GIRA_BLE_PAIR_SCAN_SECONDS:-$DEFAULT_SCAN_SECONDS}"
 CONFIRM_TRIES="${GIRA_BLE_PAIR_CONFIRM_TRIES:-60}"
 STOP_SERVICE="${GIRA_BLE_PAIR_STOP_SERVICE:-1}"
 SERVICE_NAME="${GIRA_BLE_SERVICE:-gira-ble-api}"
+FORCE_PAIR=0
 
 usage() {
   cat <<EOF
@@ -27,6 +28,7 @@ Pair/trust a Gira BLE device via BlueZ (auto-confirms passkey).
 
 Options:
   -s, --seconds N   BLE scan window before pair (default ${DEFAULT_SCAN_SECONDS})
+  -f, --force       Pair even if the MAC was not seen during scan
   -h, --help        Show this help
 
 Example:
@@ -38,6 +40,10 @@ Env (overridden by flags when set):
   GIRA_BLE_PAIR_CONFIRM_TRIES   confirm poll attempts (default ${CONFIRM_TRIES})
   GIRA_BLE_PAIR_STOP_SERVICE    stop ${SERVICE_NAME} during pair (default 1)
 EOF
+}
+
+device_seen() {
+  bluetoothctl devices 2>/dev/null | grep -qi "${MAC}"
 }
 
 normalize_mac() {
@@ -86,6 +92,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --seconds=*)
       SCAN_SECONDS="${1#*=}"
+      shift
+      ;;
+    -f | --force)
+      FORCE_PAIR=1
       shift
       ;;
     -*)
@@ -145,8 +155,8 @@ if [[ "${STOP_SERVICE}" == "1" ]] && systemctl is-active --quiet "${SERVICE_NAME
 fi
 
 echo "==> Target ${MAC}"
-echo "==> Put the device in pairing mode (BT icon / blue LED blinking)."
-echo "    Press Enter when ready…"
+echo "==> Put the device in pairing mode (BT icon / blue LED blinking),"
+echo "    stay within ~1 m of the Pi, then press Enter…"
 read -r _
 
 echo "==> Removing any previous bond"
@@ -157,14 +167,25 @@ btmgmt power on >/dev/null
 btmgmt connectable on >/dev/null
 btmgmt bondable on >/dev/null
 
-echo "==> Brief scan (${SCAN_SECONDS}s) so BlueZ knows the device…"
+echo "==> Scanning ${SCAN_SECONDS}s (scan stays on through pair)…"
 bluetoothctl scan on >/dev/null 2>&1 || true
 sleep "${SCAN_SECONDS}"
-bluetoothctl scan off >/dev/null 2>&1 || true
 
-if ! bluetoothctl devices 2>/dev/null | grep -qi "${MAC}"; then
-  echo "WARNING: ${MAC} not in 'bluetoothctl devices' yet — trying pair anyway."
-  echo "         (Device must be advertising / in pairing mode.)"
+if ! device_seen; then
+  if [[ "${FORCE_PAIR}" -eq 1 ]]; then
+    echo "WARNING: ${MAC} not seen during scan — continuing because --force."
+  else
+    bluetoothctl scan off >/dev/null 2>&1 || true
+    echo "ERROR: ${MAC} was not discovered during the ${SCAN_SECONDS}s scan." >&2
+    echo "  - Re-enter pairing mode (icon/LED must still be blinking)" >&2
+    echo "  - Stand closer; forget phone/Gira-app bond for this unit" >&2
+    echo "  - Do NOT kill bluetoothd — only stop ${SERVICE_NAME}" >&2
+    echo "  - Retry with a longer window: -s 45" >&2
+    echo "  - Or override: --force (usually still fails if not advertising)" >&2
+    exit 1
+  fi
+else
+  echo "==> Seen in scan: $(bluetoothctl devices 2>/dev/null | grep -i "${MAC}" || true)"
 fi
 
 echo "==> Starting User Confirm auto-acceptor"
@@ -181,12 +202,14 @@ echo "==> Starting User Confirm auto-acceptor"
 ) &
 CONFIRMER_PID=$!
 
-echo "==> Pair ${MAC} (LE Random, DisplayYesNo)"
+echo "==> Pair ${MAC} (LE Random, DisplayYesNo) — keep pairing mode active"
 set +e
 PAIR_OUT="$(btmgmt pair -c 1 -t 2 "${MAC}" 2>&1)"
 PAIR_RC=$?
 set -e
 printf '%s\n' "${PAIR_OUT}"
+
+bluetoothctl scan off >/dev/null 2>&1 || true
 
 # Give confirmer a moment to finish if pair returned quickly.
 sleep 1
@@ -197,15 +220,19 @@ CONFIRMER_PID=""
 echo "==> Trust ${MAC}"
 bluetoothctl trust "${MAC}" >/dev/null 2>&1 || true
 
-echo "==> Connect (optional verification)"
-set +e
-CONN_OUT="$(bluetoothctl connect "${MAC}" 2>&1)"
-CONN_RC=$?
-set -e
-printf '%s\n' "${CONN_OUT}"
-if [[ "${CONN_RC}" -eq 0 ]]; then
-  sleep 1
-  bluetoothctl disconnect "${MAC}" >/dev/null 2>&1 || true
+if is_paired || bluetoothctl devices Paired 2>/dev/null | grep -qi "${MAC}"; then
+  : # skip connect probe when already paired
+else
+  echo "==> Connect (optional verification)"
+  set +e
+  CONN_OUT="$(bluetoothctl connect "${MAC}" 2>&1)"
+  CONN_RC=$?
+  set -e
+  printf '%s\n' "${CONN_OUT}"
+  if [[ "${CONN_RC}" -eq 0 ]]; then
+    sleep 1
+    bluetoothctl disconnect "${MAC}" >/dev/null 2>&1 || true
+  fi
 fi
 
 sleep 1
