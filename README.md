@@ -122,6 +122,8 @@ Ids and MAC addresses must be unique across thermostats and covers.
 | `online_timeout_s` | No ad within this window → `online: false` |
 | `ble_timeout_s` | Connect/write timeout for setpoint |
 | `idle_disconnect_s` | Drop GATT after a successful write |
+| `heating_poll_s` | Background GATT poll for `heating_active` (seconds). `0` / omit = off |
+| `heating_listen_s` | Seconds to wait for heating notify after connect/write (default 25) |
 
 ## REST API
 
@@ -131,24 +133,64 @@ Ids and MAC addresses must be unique across thermostats and covers.
 | `GET` | `/discover?seconds=10` | — | Nearby Gira devices (blocks for the scan window) |
 | `GET` | `/thermostats` | — | List of configured thermostats + last known state |
 | `GET` | `/thermostats/{id}` | — | One thermostat |
+| `GET` | `/thermostats/{id}?refresh=1` | — | Same, after a GATT refresh of `heating_active` |
 | `POST` | `/thermostats/{id}/setpoint` | `{ "celsius": 21.0 }` | Updated state on success |
 | `GET` | `/covers` | — | List of configured covers + last known state |
 | `GET` | `/covers/{id}` | — | One cover |
 | `POST` | `/covers/{id}/command` | `{ "action": "up"\|"down"\|"stop" }` **or** `{ "position": 0..100 }` | Updated state on success |
 
-Thermostat state fields: `id`, `name`, `mac`, `online`, `paired`, `temperature_c`,
-`setpoint_c`, `last_seen_at`, `updated_at`, `rssi`, optional `error`.
+### Example responses
 
-Cover state fields: `id`, `name`, `mac`, `online`, `paired`, `position_pct`
-(0=closed … 100=open), `last_seen_at`, `updated_at`, `rssi`, optional `error`.
+Thermostat (`GET /thermostats/{id}`):
 
-`last_seen_at` is the timestamp of the last BLE advertisement from the device
-(null until the first ad). `updated_at` also moves on optimistic setpoint
-writes and errors — use `last_seen_at` for “when did we last hear from it?”.
+```json
+{
+  "id": "living",
+  "name": "Wohnzimmer",
+  "mac": "AA:BB:CC:DD:EE:FF",
+  "online": true,
+  "paired": true,
+  "temperature_c": 21.5,
+  "setpoint_c": 20.0,
+  "heating_active": false,
+  "last_seen_at": "2026-11-09T13:20:00.123456+00:00",
+  "updated_at": "2026-11-09T13:20:05.123456+00:00",
+  "rssi": -62,
+  "error": null
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `temperature_c` / `setpoint_c` | From BLE ads (null until first ad) |
+| `heating_active` | GATT-only: `true` / `false`, or `null` until a status poll / setpoint write |
+| `online` | Ad seen within `online_timeout_s` |
+| `paired` | Host OS bond status (`true`/`false`, or `null` if unknown) |
+| `last_seen_at` | Last BLE advertisement (null until first ad) |
+| `updated_at` | Last local state change (ad, optimistic write, status poll, or error) |
+| `error` | Last command/poll error string, else `null` |
+
+Cover (`GET /covers/{id}`):
+
+```json
+{
+  "id": "living_blind",
+  "name": "Wohnzimmer Jalousie",
+  "mac": "11:22:33:44:55:66",
+  "online": true,
+  "paired": true,
+  "position_pct": 75,
+  "last_seen_at": "2026-11-09T13:20:00.123456+00:00",
+  "updated_at": "2026-11-09T13:20:00.123456+00:00",
+  "rssi": -70,
+  "error": null
+}
+```
+
+`position_pct` is percent open (`0` = closed … `100` = open).
 
 `paired` is the host OS bond status: BlueZ (`bluetoothctl`) on Linux/Pi,
-`system_profiler` / IOBluetooth on macOS. `true`/`false` when known;
-`null` if the host cannot determine it.
+`system_profiler` / IOBluetooth on macOS.
 
 ### Setpoint / pairing
 
