@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 from gira_ble_api.api.auth import BearerTokenMiddleware
@@ -70,18 +71,62 @@ def create_app(
     )
     controller: BleController | None = None
     watch_macs = {t.mac for t in config.thermostats} | {c.mac for c in config.covers}
+    heating_poll_task: asyncio.Task[None] | None = None
 
     def on_ad(mac: str, update: Any, rssi: int | None) -> None:
         store.apply_advertisement(mac, update, rssi)
 
+    async def _refresh_heating(thermostat_id: str) -> None:
+        """One GATT status fetch for heating_active (may re-write known setpoint)."""
+        assert controller is not None
+        mac = store.get_mac(thermostat_id)
+        if mac is None:
+            raise BleCommandError(
+                f"Unknown thermostat id: {thermostat_id}",
+                code="not_found",
+            )
+        provoke = store.get_setpoint(thermostat_id)
+        update = await controller.fetch_thermostat_status(
+            mac, provoke_setpoint_c=provoke
+        )
+        store.apply_status_update(thermostat_id, update)
+
+    async def _heating_poll_loop() -> None:
+        interval = config.heating_poll_s
+        logger.info(
+            "Heating status background poll every %.0fs (%d thermostat(s))",
+            interval,
+            len(config.thermostats),
+        )
+        while True:
+            await asyncio.sleep(interval)
+            if controller is None:
+                continue
+            for thermo in config.thermostats:
+                try:
+                    await _refresh_heating(thermo.id)
+                    row = store.get(thermo.id)
+                    logger.debug(
+                        "Heating poll ok %s heating_active=%s",
+                        thermo.id,
+                        None if row is None else row.get("heating_active"),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Heating poll failed for %s: %s", thermo.id, exc)
+                # Small gap between devices so the adapter can settle.
+                await asyncio.sleep(1.0)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal controller
+        nonlocal controller, heating_poll_task
         if enable_ble and watch_macs:
             controller = BleController(
                 watch_macs,
                 on_advertisement=on_ad,
                 ble_timeout_s=max(config.ble_timeout_s, 30.0),
+                heating_listen_s=config.heating_listen_s,
             )
             app.state.controller = controller
             try:
@@ -91,7 +136,23 @@ def create_app(
                     "Failed to start BLE scanner — API will still serve "
                     "configured devices; commands may still work"
                 )
+            if config.heating_poll_s > 0 and config.thermostats:
+                heating_poll_task = asyncio.create_task(
+                    _heating_poll_loop(), name="heating-poll"
+                )
+            else:
+                logger.info(
+                    "Heating background poll disabled "
+                    "(set heating_poll_s > 0 in config to enable)"
+                )
         yield
+        if heating_poll_task is not None:
+            heating_poll_task.cancel()
+            try:
+                await heating_poll_task
+            except asyncio.CancelledError:
+                pass
+            heating_poll_task = None
         if controller is not None:
             await controller.stop()
 
@@ -160,11 +221,38 @@ def create_app(
         return store.list_thermostats(paired_by_mac=paired)
 
     @app.get("/thermostats/{thermostat_id}")
-    async def get_thermostat(thermostat_id: str, request: Request) -> dict:
+    async def get_thermostat(
+        thermostat_id: str,
+        request: Request,
+        refresh: bool = Query(
+            False,
+            description="If true, open a GATT session and refresh heating_active",
+        ),
+    ) -> dict:
         store: DeviceStore = request.app.state.store
+        ctrl: BleController | None = request.app.state.controller
         state = store.get(thermostat_id)
         if state is None:
             raise HTTPException(status_code=404, detail=f"Unknown thermostat id: {thermostat_id}")
+
+        if refresh:
+            if ctrl is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": "BLE not available", "code": "ble_disabled"},
+                )
+            try:
+                await _refresh_heating(thermostat_id)
+            except BleCommandError as exc:
+                store.set_error(thermostat_id, str(exc))
+                status = 504 if exc.code in {"ble_timeout", "not_found"} else 502
+                if exc.code == "not_paired":
+                    status = 503
+                raise HTTPException(
+                    status_code=status,
+                    detail={"error": str(exc), "code": exc.code},
+                ) from exc
+
         paired = await paired_map_async([state["mac"]])
         return store.get(thermostat_id, paired=paired.get(state["mac"])) or state
 
@@ -220,7 +308,7 @@ def create_app(
             )
 
         try:
-            await ctrl.write_command(state["mac"], command)
+            notify_update = await ctrl.write_command(state["mac"], command)
         except BleCommandError as exc:
             store.set_error(thermostat_id, str(exc))
             status = 504 if exc.code in {"ble_timeout", "not_found"} else 502
@@ -232,6 +320,7 @@ def create_app(
             ) from exc
 
         store.set_setpoint_optimistic(thermostat_id, temp_c)
+        store.apply_status_update(thermostat_id, notify_update)
         paired = await paired_map_async([state["mac"]])
         updated = store.get(thermostat_id, paired=paired.get(state["mac"]))
         assert updated is not None

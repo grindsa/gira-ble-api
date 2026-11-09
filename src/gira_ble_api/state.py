@@ -22,6 +22,7 @@ class ThermostatState:
     mac: str
     temperature_c: float | None = None
     setpoint_c: float | None = None
+    heating_active: bool | None = None
     last_seen_at: datetime | None = None
     updated_at: datetime | None = None
     rssi: int | None = None
@@ -45,6 +46,8 @@ class ThermostatState:
             "paired": paired,
             "temperature_c": self.temperature_c,
             "setpoint_c": self.setpoint_c,
+            # GATT-only (property 0xF8); null until a status poll / setpoint write.
+            "heating_active": self.heating_active,
             # Last BLE advertisement received from the device (null until first ad).
             "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             # Any local state change (ad, optimistic setpoint, or error).
@@ -216,6 +219,8 @@ class DeviceStore:
                     state.temperature_c = update.temperature_c
                 if update.setpoint_c is not None:
                     state.setpoint_c = update.setpoint_c
+                if update.heating_active is not None:
+                    state.heating_active = update.heating_active
                 return
 
             state_c = self._covers[device_id]
@@ -235,6 +240,31 @@ class DeviceStore:
             state.setpoint_c = setpoint_c
             state.updated_at = _utcnow()
             state.error = None
+
+    def get_setpoint(self, thermostat_id: str) -> float | None:
+        with self._lock:
+            state = self._thermostats.get(thermostat_id)
+            return state.setpoint_c if state else None
+
+    def apply_status_update(
+        self,
+        thermostat_id: str,
+        update: AdvertisementUpdate,
+    ) -> None:
+        """Merge GATT-notify fields (heating / temp / setpoint) into state."""
+        with self._lock:
+            state = self._thermostats.get(thermostat_id)
+            if state is None:
+                return
+            now = _utcnow()
+            state.updated_at = now
+            state.error = None
+            if update.temperature_c is not None:
+                state.temperature_c = update.temperature_c
+            if update.setpoint_c is not None:
+                state.setpoint_c = update.setpoint_c
+            if update.heating_active is not None:
+                state.heating_active = update.heating_active
 
     def set_position_optimistic(self, cover_id: str, position_pct: int) -> None:
         with self._lock:

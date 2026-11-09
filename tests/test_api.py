@@ -48,6 +48,7 @@ def test_list_thermostats() -> None:
     assert data[0]["mac"] == "AA:BB:CC:DD:EE:FF"
     assert data[0]["online"] is False
     assert data[0]["temperature_c"] is None
+    assert data[0]["heating_active"] is None
     assert data[0]["last_seen_at"] is None
     assert data[0]["updated_at"] is None
     assert "paired" in data[0]
@@ -58,6 +59,14 @@ def test_get_thermostat() -> None:
     r = client.get("/thermostats/living")
     assert r.status_code == 200
     assert r.json()["id"] == "living"
+    assert r.json()["heating_active"] is None
+
+
+def test_get_thermostat_refresh_requires_ble() -> None:
+    client = _app()
+    r = client.get("/thermostats/living", params={"refresh": "1"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "ble_disabled"
 
 
 def test_get_unknown() -> None:

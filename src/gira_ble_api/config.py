@@ -71,6 +71,11 @@ class AppConfig(BaseModel):
     online_timeout_s: float = 120.0
     ble_timeout_s: float = 20.0
     idle_disconnect_s: float = 5.0
+    # Background GATT poll for heating_active. 0 / omitted = no poll (on-demand only).
+    # Set e.g. 120 to poll every 2 minutes on the Pi.
+    heating_poll_s: float = 0.0
+    # How long to keep GATT open waiting for property 0xF8 after connect/write.
+    heating_listen_s: float = 25.0
     # Empty / omitted → no auth. Comma-separated string or YAML list of Bearer tokens.
     api_tokens: list[str] = Field(default_factory=list)
     thermostats: list[ThermostatConfig] = Field(default_factory=list)

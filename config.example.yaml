@@ -25,6 +25,13 @@ ble_timeout_s: 30
 # Keep GATT open briefly for rapid successive commands, then disconnect.
 idle_disconnect_s: 5
 
+# Background GATT poll for heating_active. 0 / omit = no poll (default).
+# On the Pi, set e.g. 120 to refresh every 2 minutes. On-demand still works:
+#   GET /thermostats/{id}?refresh=1
+heating_poll_s: 0
+# Seconds to wait for heating status notify after connect / setpoint write.
+heating_listen_s: 25
+
 thermostats:
   - id: living
     name: Wohnzimmer

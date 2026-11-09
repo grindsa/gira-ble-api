@@ -16,6 +16,8 @@ Gira 539403 / 536727  ←BLE→  gira-ble-api (Bleak)  ←HTTP REST→  clients 
 
 - Passive scan of Gira manufacturer ads (company id **1412**) for live
   `temperature_c` / `setpoint_c` and cover `position_pct`
+- `heating_active` via short GATT notify (property `0xF8`); optional background
+  poll when `heating_poll_s > 0`, or on-demand with `GET ...?refresh=1`
 - `POST .../setpoint` and `POST .../covers/{id}/command` via short-lived GATT
   write (lazy pair, idle disconnect)
 - YAML-configured thermostats and covers; binds to `127.0.0.1:8787` by default
@@ -277,8 +279,11 @@ Thermostat:
 
 - Actual temp ad prefix: `F7 01 41 01 FE 10 01` + u16 (dual-scale decode)
 - Setpoint ad prefix: `F7 00 65 01 FF 10 01` + u16
+- Heating active (GATT notify only): `F7 00 65 01 F8 10 01` + `00`/`01`
 - Setpoint write: `F6 00 65 01 F5 10 01` + u16 with
   `raw = round((21 + °C) * 50 + 1000)`
+- `heating_active` is not in advertisements; a GATT connect is required. Status
+  polls re-write the known setpoint to provoke the `0xF8` notify.
 
 Cover (object `0x0320`):
 

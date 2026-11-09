@@ -28,3 +28,11 @@ def test_keeps_scan() -> None:
 
 def test_verbose_before_scan() -> None:
     assert _with_default_serve(["-v", "scan"]) == ["-v", "scan"]
+
+
+def test_keeps_sniff() -> None:
+    assert _with_default_serve(["sniff", "--id", "dg-office"]) == [
+        "sniff",
+        "--id",
+        "dg-office",
+    ]

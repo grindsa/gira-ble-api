@@ -21,14 +21,18 @@ MSG_NOTIFY = 0xF7
 # Thermostat object id 0x0065 (101)
 THERMO_OBJECT_ID = bytes([0x00, 0x65])
 
-# Advertisement value prefixes (payload after company id):
+# Advertisement / GATT-notify value prefixes (payload after company id):
 #   F7 01 41 01 FE 10 01 <hi> <lo>  — current temperature
 #   F7 00 65 01 FF 10 01 <hi> <lo>  — target / setpoint temperature
+#   F7 00 65 01 F8 10 01 <00|01>    — heating active (GATT notify; not in ads)
 THERMO_CURRENT_TEMP_PREFIX = bytes.fromhex("F7014101FE1001")
 THERMO_TARGET_TEMP_PREFIX = bytes.fromhex("F7006501FF1001")
+THERMO_HEATING_PREFIX = bytes.fromhex("F7006501F81001")
 
 # Write: set absolute target temperature (property 0xF5, u16 payload).
 THERMO_PROPERTY_TARGET_TEMP = 0xF5
+# Status: heating output active (property 0xF8, PDT_BINARY).
+THERMO_PROPERTY_HEATING = 0xF8
 
 # Dual-scale advertisement decode threshold (raw u16).
 # raw <= 2100 → °C = raw / 100

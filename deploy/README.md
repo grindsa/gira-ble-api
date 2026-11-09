@@ -63,13 +63,13 @@ sudo systemctl stop gira-ble-api
 
 # Device in pairing mode (thermostat BT icon / cover blue LED blinking).
 # Stand close — RSSI should be better than about -80 (worse than -90 is flaky).
-sudo gira-ble-pair-agent -s 40 C7:F5:40:A6:81:66
+sudo gira-ble-pair-agent -s 40 AA:BB:CC:DD:EE:FF
 ```
 
 Success looks like:
 
 ```text
-Found C7:F5:40:A6:81:66 … RSSI=-65
+Found AA:BB:CC:DD:EE:FF … RSSI=-65
 Calling async Pair() …
 AUTO-CONFIRM …          # optional; some units bond without this line
 Pair() completed
@@ -80,7 +80,7 @@ OK: …
 Verify and restart:
 
 ```bash
-bluetoothctl info C7:F5:40:A6:81:66   # Paired: yes
+bluetoothctl info AA:BB:CC:DD:EE:FF   # Paired: yes
 sudo systemctl start gira-ble-api
 # then POST /thermostats/…/setpoint or /covers/…/command
 ```
@@ -88,14 +88,45 @@ sudo systemctl start gira-ble-api
 Clear a bad bond before retrying:
 
 ```bash
-sudo bluetoothctl remove C7:F5:40:A6:81:66
+sudo bluetoothctl remove AA:BB:CC:DD:EE:FF
 ```
 
 ### Manual fallback
 
-If needed, use a single `bluetoothctl` session with `agent DisplayYesNo` and
-type `yes` only on the `[agent] Confirm passkey…` prompt (not at the main
-`[bluetoothctl]>` prompt). Prefer `gira-ble-pair-agent` instead.
+Prefer `gira-ble-pair-agent`. If you must use `bluetoothctl`, use **one**
+session only (do not run a second `bluetoothctl` for scanning).
+
+```bash
+sudo systemctl stop gira-ble-api
+sudo bluetoothctl remove AA:BB:CC:DD:EE:FF   # optional; clear bad bond
+sudo bluetoothctl
+```
+
+Inside `bluetoothctl` (device already in pairing mode, stay close):
+
+```text
+power on
+pairable on
+agent off
+agent DisplayYesNo
+default-agent
+scan on
+devices
+pair AA:BB:CC:DD:EE:FF
+```
+
+Wait for a line like `[agent] Confirm passkey 000000 (yes/no):`, then type
+`yes` **there** (not at the normal `[bluetoothctl]>` prompt — that prints
+`Invalid command in menu main: yes`). Then:
+
+```text
+trust AA:BB:CC:DD:EE:FF
+info AA:BB:CC:DD:EE:FF
+scan off
+quit
+```
+
+Confirm `Paired: yes` / `Bonded: yes`, then `sudo systemctl start gira-ble-api`.
 
 ## Updates
 

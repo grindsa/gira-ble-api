@@ -13,7 +13,7 @@ import uvicorn
 
 from gira_ble_api.config import load_config
 
-_SUBCOMMANDS = frozenset({"serve", "scan"})
+_SUBCOMMANDS = frozenset({"serve", "scan", "sniff"})
 
 
 def _default_config_path() -> Path:
@@ -100,6 +100,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print JSON instead of a table",
     )
 
+    sniff = sub.add_parser(
+        "sniff",
+        help="Connect and dump GATT notifications (protocol discovery)",
+    )
+    sniff.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to config.yaml (used with --id)",
+    )
+    sniff.add_argument(
+        "--id",
+        dest="device_id",
+        default=None,
+        help="Thermostat or cover id from config.yaml",
+    )
+    sniff.add_argument(
+        "--mac",
+        default=None,
+        help="Device address / CoreBluetooth UUID (overrides --id)",
+    )
+    sniff.add_argument(
+        "-s",
+        "--seconds",
+        type=float,
+        default=90.0,
+        help="How long to keep the GATT session open (default: 90)",
+    )
+    sniff.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Connect / discovery timeout in seconds (default: 30)",
+    )
+    sniff.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Write the dump to this file as well as stdout",
+    )
+    sniff.add_argument(
+        "--write-hex",
+        default=None,
+        help="Optional GATT write payload (hex) after subscribe, to provoke notifies",
+    )
+
     return parser
 
 
@@ -116,6 +164,54 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(json.dumps([d.to_dict() for d in devices], indent=2))
     else:
         print(format_discovery_table(devices))
+    return 0
+
+
+def _resolve_sniff_mac(args: argparse.Namespace) -> str:
+    if args.mac:
+        return args.mac
+    if not args.device_id:
+        raise ValueError("Provide --mac or --id (with -c config.yaml)")
+
+    config_path = args.config or _default_config_path()
+    config = load_config(config_path)
+    for thermo in config.thermostats:
+        if thermo.id == args.device_id:
+            return thermo.mac
+    for cover in config.covers:
+        if cover.id == args.device_id:
+            return cover.mac
+    raise ValueError(f"Unknown device id in config: {args.device_id}")
+
+
+def _cmd_sniff(args: argparse.Namespace) -> int:
+    from gira_ble_api.ble.sniff import sniff_gatt_notifies
+
+    try:
+        mac = _resolve_sniff_mac(args)
+    except Exception as exc:
+        logging.error("%s", exc)
+        return 1
+
+    logging.info("Sniffing GATT notifies on %s for %.0fs", mac, args.seconds)
+    try:
+        count = asyncio.run(
+            sniff_gatt_notifies(
+                mac,
+                seconds=args.seconds,
+                timeout_s=args.timeout,
+                output=args.output,
+                write_hex=args.write_hex,
+            )
+        )
+    except KeyboardInterrupt:
+        logging.info("Sniff interrupted")
+        return 130
+    except Exception as exc:
+        logging.error("Sniff failed: %s", exc)
+        return 1
+
+    logging.info("Received %d notification(s)", count)
     return 0
 
 
@@ -166,6 +262,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "scan":
         raise SystemExit(_cmd_scan(args))
+    if args.command == "sniff":
+        raise SystemExit(_cmd_sniff(args))
     raise SystemExit(_cmd_serve(args))
 
 

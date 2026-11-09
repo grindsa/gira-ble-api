@@ -2,7 +2,7 @@
 
 On macOS, a running BleakScanner often prevents reliable connects. We wait for
 a fresh advertisement, pause scanning, connect immediately with that BLEDevice,
-write, disconnect, then resume.
+write / listen, disconnect, then resume.
 """
 
 from __future__ import annotations
@@ -13,10 +13,13 @@ import sys
 import time
 
 from bleak import BleakClient, BleakError, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 
 from gira_ble_api.protocol import GIRA_WRITE_CHAR_UUID
-from gira_ble_api.protocol.ads import AdvertisementUpdate
+from gira_ble_api.protocol.ads import AdvertisementUpdate, parse_manufacturer_data
+from gira_ble_api.protocol.commands import build_setpoint_command
+from gira_ble_api.protocol.constants import GIRA_READ_CHAR_UUID
 
 from .client import BleCommandError, normalize_mac
 from .scanner import BleScanner
@@ -41,10 +44,12 @@ class BleController:
         *,
         ble_timeout_s: float = 30.0,
         connect_attempts: int = 3,
+        heating_listen_s: float = 25.0,
     ) -> None:
         self._macs = {normalize_mac(m) for m in macs}
         self._ble_timeout_s = ble_timeout_s
         self._connect_attempts = max(1, connect_attempts)
+        self._heating_listen_s = max(1.0, heating_listen_s)
         self._adapter_lock = asyncio.Lock()
         self._devices: dict[str, BLEDevice] = {}
         self._seen_at: dict[str, float] = {}
@@ -75,8 +80,38 @@ class BleController:
     async def stop(self) -> None:
         await self._scanner.stop()
 
-    async def write_command(self, mac: str, payload: bytes) -> None:
-        """Wait for fresh ad → pause scan → connect/write → resume."""
+    async def write_command(self, mac: str, payload: bytes) -> AdvertisementUpdate:
+        """Wait for fresh ad → pause scan → connect/write → listen → resume."""
+        return await self._with_exclusive_gatt(
+            mac,
+            lambda address, device, attempt: self._connect_write_listen(
+                address,
+                device=device,
+                attempt=attempt,
+                payload=payload,
+                listen_s=self._heating_listen_s,
+            ),
+        )
+
+    async def fetch_thermostat_status(
+        self,
+        mac: str,
+        *,
+        provoke_setpoint_c: float | None = None,
+    ) -> AdvertisementUpdate:
+        """Connect, subscribe, optionally re-write setpoint to provoke 0xF8."""
+        return await self._with_exclusive_gatt(
+            mac,
+            lambda address, device, attempt: self._connect_status_listen(
+                address,
+                device=device,
+                attempt=attempt,
+                provoke_setpoint_c=provoke_setpoint_c,
+                listen_s=self._heating_listen_s,
+            ),
+        )
+
+    async def _with_exclusive_gatt(self, mac: str, action) -> AdvertisementUpdate:
         address = normalize_mac(mac)
         last_error: Exception | None = None
 
@@ -86,17 +121,12 @@ class BleController:
                 try:
                     device = await self._wait_for_fresh_device(address)
                     if was_running:
-                        logger.info("Pausing BLE scanner for GATT command")
+                        logger.info("Pausing BLE scanner for GATT session")
                         await self._scanner.stop()
-                        # Connect immediately — long gaps make Gira units non-connectable.
-                    await self._connect_and_write(
-                        address, payload, device=device, attempt=attempt
-                    )
-                    return
+                    return await action(address, device, attempt)
                 except BleCommandError as exc:
                     last_error = exc
                     if exc.code == "not_found":
-                        # No point retrying the same absence forever.
                         break
                     logger.warning(
                         "GATT attempt %d/%d failed for %s: %s",
@@ -115,7 +145,6 @@ class BleController:
                         address,
                         _exc_text(exc),
                     )
-                    # Drop stale handle; next attempt waits for a new ad.
                     self._devices.pop(address, None)
                     self._seen_at.pop(address, None)
                     await asyncio.sleep(0.3 * attempt)
@@ -128,6 +157,9 @@ class BleController:
                             logger.exception("Failed to resume BLE scanner")
 
         assert last_error is not None
+        raise self._wrap_final_error(address, last_error) from last_error
+
+    def _wrap_final_error(self, address: str, last_error: Exception) -> BleCommandError:
         msg = _exc_text(last_error).lower()
         code = "ble_timeout"
         if isinstance(last_error, BleCommandError):
@@ -152,11 +184,11 @@ class BleController:
                 "(agent NoInputNoOutput + pair/trust) while the thermostat is in "
                 "pairing mode — see deploy/README.md. Then retry the setpoint."
             )
-        raise BleCommandError(
+        return BleCommandError(
             f"BLE failed for {address} after {self._connect_attempts} attempt(s): "
             f"{_exc_text(last_error)}.{hint}",
             code=code,
-        ) from last_error
+        )
 
     async def _wait_for_fresh_device(
         self, address: str, *, max_age_s: float = 3.0
@@ -166,7 +198,9 @@ class BleController:
         seen = self._seen_at.get(address)
         device = self._devices.get(address)
         if device is not None and seen is not None and (now - seen) <= max_age_s:
-            logger.debug("Using fresh cached BLEDevice for %s (%.1fs old)", address, now - seen)
+            logger.debug(
+                "Using fresh cached BLEDevice for %s (%.1fs old)", address, now - seen
+            )
             return device
 
         if not self._scanner.running:
@@ -182,7 +216,6 @@ class BleController:
         try:
             await asyncio.wait_for(event.wait(), timeout=self._ble_timeout_s)
         except TimeoutError as exc:
-            # Last resort: active find (starts its own short scan).
             logger.info("No ad callback; trying BleakScanner.find_device_by_address…")
             found = await BleakScanner.find_device_by_address(
                 address, timeout=min(15.0, self._ble_timeout_s)
@@ -205,25 +238,23 @@ class BleController:
             )
         return device
 
-    async def _connect_and_write(
+    async def _connect_write_listen(
         self,
         address: str,
-        payload: bytes,
         *,
         device: BLEDevice,
         attempt: int,
-    ) -> None:
+        payload: bytes,
+        listen_s: float,
+    ) -> AdvertisementUpdate:
         logger.info(
             "Connecting to %s (attempt %d, timeout=%.0fs)",
             address,
             attempt,
             self._ble_timeout_s,
         )
-
-        # pair=False: on headless BlueZ, pair=True often yields AuthenticationCanceled
-        # without an agent. First bond the device with bluetoothctl (see deploy/README).
-        # macOS ignores pair= and prompts on the first encrypted GATT write instead.
         client = BleakClient(device, timeout=self._ble_timeout_s, pair=False)
+        merged = AdvertisementUpdate()
         try:
             await asyncio.wait_for(client.connect(), timeout=self._ble_timeout_s)
             if not client.is_connected:
@@ -232,11 +263,25 @@ class BleController:
                     code="ble_connect",
                 )
 
-            logger.info("Connected to %s; writing %s", address, payload.hex())
+            heating_event = asyncio.Event()
+
+            def _on_notify(_sender: BleakGATTCharacteristic, data: bytearray) -> None:
+                nonlocal merged
+                update = parse_manufacturer_data(bytes(data))
+                merged = merged.merge(update)
+                if update.heating_active is not None:
+                    heating_event.set()
+
+            try:
+                await client.start_notify(GIRA_READ_CHAR_UUID, _on_notify)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("start_notify failed on %s: %s", address, exc)
+
             write_timeout = max(
                 self._ble_timeout_s,
                 60.0 if sys.platform == "darwin" else self._ble_timeout_s,
             )
+            logger.info("Connected to %s; writing %s", address, payload.hex())
             await asyncio.wait_for(
                 client.write_gatt_char(
                     GIRA_WRITE_CHAR_UUID,
@@ -245,10 +290,85 @@ class BleController:
                 ),
                 timeout=write_timeout,
             )
-            logger.info("GATT write ok %s", address)
+            logger.info("GATT write ok %s; listening %.0fs for status", address, listen_s)
+            await self._wait_for_heating(heating_event, listen_s)
+            return merged
         finally:
             try:
                 if client.is_connected:
                     await client.disconnect()
             except Exception:  # noqa: BLE001
                 logger.debug("disconnect error for %s", address, exc_info=True)
+
+    async def _connect_status_listen(
+        self,
+        address: str,
+        *,
+        device: BLEDevice,
+        attempt: int,
+        provoke_setpoint_c: float | None,
+        listen_s: float,
+    ) -> AdvertisementUpdate:
+        logger.info(
+            "Connecting to %s for status (attempt %d, timeout=%.0fs)",
+            address,
+            attempt,
+            self._ble_timeout_s,
+        )
+        client = BleakClient(device, timeout=self._ble_timeout_s, pair=False)
+        merged = AdvertisementUpdate()
+        try:
+            await asyncio.wait_for(client.connect(), timeout=self._ble_timeout_s)
+            if not client.is_connected:
+                raise BleCommandError(
+                    f"Could not connect to {address}",
+                    code="ble_connect",
+                )
+
+            heating_event = asyncio.Event()
+
+            def _on_notify(_sender: BleakGATTCharacteristic, data: bytearray) -> None:
+                nonlocal merged
+                update = parse_manufacturer_data(bytes(data))
+                merged = merged.merge(update)
+                if update.heating_active is not None:
+                    heating_event.set()
+
+            await client.start_notify(GIRA_READ_CHAR_UUID, _on_notify)
+
+            # Re-writing the known setpoint provokes property 0xF8; idle subscribe alone
+            # often only yields temperature frames.
+            if provoke_setpoint_c is not None:
+                payload = build_setpoint_command(provoke_setpoint_c)
+                write_timeout = max(
+                    self._ble_timeout_s,
+                    60.0 if sys.platform == "darwin" else self._ble_timeout_s,
+                )
+                logger.info(
+                    "Provoking heating status on %s via setpoint %.1f°C",
+                    address,
+                    provoke_setpoint_c,
+                )
+                await asyncio.wait_for(
+                    client.write_gatt_char(
+                        GIRA_WRITE_CHAR_UUID,
+                        payload,
+                        response=True,
+                    ),
+                    timeout=write_timeout,
+                )
+
+            await self._wait_for_heating(heating_event, listen_s)
+            return merged
+        finally:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception:  # noqa: BLE001
+                logger.debug("disconnect error for %s", address, exc_info=True)
+
+    async def _wait_for_heating(self, heating_event: asyncio.Event, listen_s: float) -> None:
+        try:
+            await asyncio.wait_for(heating_event.wait(), timeout=listen_s)
+        except TimeoutError:
+            logger.debug("No heating_active notify within %.0fs", listen_s)

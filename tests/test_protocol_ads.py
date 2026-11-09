@@ -45,7 +45,28 @@ def test_parse_unrelated_payload() -> None:
     update = parse_manufacturer_data(bytes.fromhex("0102030405"))
     assert update.temperature_c is None
     assert update.setpoint_c is None
+    assert update.heating_active is None
     assert update.position_pct is None
+
+
+def test_parse_heating_active_on() -> None:
+    # F7 00 65 01 F8 10 01 01 — heating active
+    update = parse_manufacturer_data(bytes.fromhex("F7006501F8100101"))
+    assert update.heating_active is True
+    assert update.setpoint_c is None
+
+
+def test_parse_heating_active_off() -> None:
+    update = parse_manufacturer_data(bytes.fromhex("F7006501F8100100"))
+    assert update.heating_active is False
+
+
+def test_merge_prefers_non_none() -> None:
+    a = parse_manufacturer_data(bytes.fromhex("F7006501F8100100"))
+    b = parse_manufacturer_data(bytes.fromhex("F7014101FE10010C14"))
+    merged = a.merge(b)
+    assert merged.heating_active is False
+    assert merged.temperature_c == 20.84
 
 
 def test_parse_cover_position() -> None:
