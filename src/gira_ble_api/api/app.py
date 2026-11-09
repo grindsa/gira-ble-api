@@ -94,29 +94,31 @@ def create_app(
     async def _heating_poll_loop() -> None:
         interval = config.heating_poll_s
         logger.info(
-            "Heating status background poll every %.0fs (%d thermostat(s))",
+            "Heating status background poll every %.0fs (%d thermostat(s)); "
+            "first poll runs immediately",
             interval,
             len(config.thermostats),
         )
         while True:
+            if controller is not None:
+                for thermo in config.thermostats:
+                    try:
+                        await _refresh_heating(thermo.id)
+                        row = store.get(thermo.id)
+                        logger.debug(
+                            "Heating poll ok %s heating_active=%s",
+                            thermo.id,
+                            None if row is None else row.get("heating_active"),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Heating poll failed for %s: %s", thermo.id, exc
+                        )
+                    # Small gap between devices so the adapter can settle.
+                    await asyncio.sleep(1.0)
             await asyncio.sleep(interval)
-            if controller is None:
-                continue
-            for thermo in config.thermostats:
-                try:
-                    await _refresh_heating(thermo.id)
-                    row = store.get(thermo.id)
-                    logger.debug(
-                        "Heating poll ok %s heating_active=%s",
-                        thermo.id,
-                        None if row is None else row.get("heating_active"),
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning("Heating poll failed for %s: %s", thermo.id, exc)
-                # Small gap between devices so the adapter can settle.
-                await asyncio.sleep(1.0)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
