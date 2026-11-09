@@ -170,9 +170,17 @@ def wait_for_device(
     )
 
 
-def pair_device(bus: dbus.SystemBus, device_path: str, agent: Agent, timeout_s: int = 45) -> None:
-    import threading
+def remove_device(bus: dbus.SystemBus, adapter_path: str, device_path: str) -> None:
+    adapter = dbus.Interface(bus.get_object(BUS_NAME, adapter_path), ADAPTER_IFACE)
+    try:
+        adapter.RemoveDevice(device_path)
+        print(f"Removed stale cache entry {device_path}", flush=True)
+    except dbus.exceptions.DBusException as exc:
+        print(f"remove warning: {exc}", flush=True)
 
+
+def pair_device(bus: dbus.SystemBus, device_path: str, agent: Agent, timeout_s: int = 60) -> None:
+    """Async Pair() so the GLib loop can deliver agent RequestConfirmation."""
     device = dbus.Interface(bus.get_object(BUS_NAME, device_path), DEVICE_IFACE)
     props = props_iface(bus, device_path)
 
@@ -182,43 +190,36 @@ def pair_device(bus: dbus.SystemBus, device_path: str, agent: Agent, timeout_s: 
     except dbus.exceptions.DBusException as exc:
         print(f"trust warning: {exc}", flush=True)
 
-    paired = bool(props.Get(DEVICE_IFACE, "Paired"))
-    if paired:
+    if bool(props.Get(DEVICE_IFACE, "Paired")):
         print("Already Paired: yes", flush=True)
         return
 
-    print(f"Calling Pair() on {device_path}…", flush=True)
-    # Pair() blocks; agent D-Bus callbacks need the GLib loop on the main thread.
-    error: list[BaseException] = []
-    done = {"ok": False}
+    print(f"Calling async Pair() on {device_path}…", flush=True)
     loop = GLib.MainLoop()
+    result: dict = {"ok": False, "error": None}
 
-    def _do_pair() -> None:
-        try:
-            device.Pair()
-            done["ok"] = True
-        except BaseException as exc:  # noqa: BLE001
-            error.append(exc)
-        GLib.idle_add(loop.quit)
+    def on_ok():
+        result["ok"] = True
+        print("Pair() completed", flush=True)
+        loop.quit()
 
-    thread = threading.Thread(target=_do_pair, name="bluez-pair", daemon=True)
-    thread.start()
+    def on_err(exc):
+        result["error"] = exc
+        print(f"Pair() error: {exc}", flush=True)
+        loop.quit()
 
-    def _watchdog():
-        if not thread.is_alive():
-            loop.quit()
-            return False
-        return True
-
-    GLib.timeout_add(500, _watchdog)
+    device.Pair(reply_handler=on_ok, error_handler=on_err)
     GLib.timeout_add(timeout_s * 1000, loop.quit)
     loop.run()
-    thread.join(timeout=5)
 
-    if error:
-        raise error[0]
-    if not done["ok"]:
-        raise TimeoutError("Pair() timed out")
+    if result["error"] is not None:
+        raise result["error"]
+    if not result["ok"]:
+        raise TimeoutError(
+            f"Pair() timed out after {timeout_s}s "
+            f"(agent confirmed={agent.confirmed}). "
+            "Re-enter pairing mode, stand closer, retry."
+        )
 
     paired = bool(props.Get(DEVICE_IFACE, "Paired"))
     try:
@@ -297,13 +298,14 @@ def main() -> int:
     try:
         objects = get_managed_objects(bus)
         adapter_path = find_adapter_path(objects)
-        device_path = find_device_path(objects, mac)
-        if device_path is None:
-            device_path = wait_for_device(bus, adapter_path, mac, seconds=args.seconds)
-        else:
-            print(f"Already in cache: {device_path}", flush=True)
+        stale = find_device_path(objects, mac)
+        if stale is not None:
+            # Drop stale cache so we reconnect while the unit is in pairing mode.
+            remove_device(bus, adapter_path, stale)
+            time.sleep(0.5)
 
-        # Re-assert default agent in case bluetoothctl stole it earlier.
+        manager.RequestDefaultAgent(AGENT_PATH)
+        device_path = wait_for_device(bus, adapter_path, mac, seconds=args.seconds)
         manager.RequestDefaultAgent(AGENT_PATH)
         pair_device(bus, device_path, agent)
     except Exception as exc:  # noqa: BLE001
