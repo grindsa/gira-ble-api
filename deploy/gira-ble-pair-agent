@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-"""BlueZ Agent1 that auto-accepts Gira User Confirm / passkey prompts.
+"""BlueZ Agent1 that auto-accepts Gira User Confirm, and can Pair a MAC.
 
-Run as root in its own terminal while pairing with bluetoothctl:
-
+Usage:
+  # Register agent only (then pair with bluetoothctl — run 'agent off' first):
   sudo gira-ble-pair-agent
 
-Then in another terminal use bluetoothctl (agent already provided by this
-process — do NOT register a second agent there):
+  # Recommended: agent + Pair in one process (no bluetoothctl agent fight):
+  sudo gira-ble-pair-agent D0:A2:40:8F:13:0A
+  sudo gira-ble-pair-agent -s 40 D0:A2:40:8F:13:0A
 
-  sudo bluetoothctl
-  power on
-  pairable on
-  scan on
-  pair AA:BB:CC:DD:EE:FF
-  trust AA:BB:CC:DD:EE:FF
-
-Ctrl-C to stop the agent when done.
+Requires: python3-dbus python3-gi
+  sudo apt install -y python3-dbus python3-gi
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
+import time
 
 try:
     import dbus
@@ -39,11 +36,31 @@ except ImportError as exc:  # pragma: no cover
 BUS_NAME = "org.bluez"
 AGENT_IFACE = "org.bluez.Agent1"
 AGENT_MANAGER_IFACE = "org.bluez.AgentManager1"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+DEVICE_IFACE = "org.bluez.Device1"
+PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER_IFACE = "org.freedesktop.DBus.ObjectManager"
 AGENT_PATH = "/org/bluez/gira_ble_pair_agent"
 CAPABILITY = "DisplayYesNo"
 
 
+def normalize_mac(raw: str) -> str:
+    text = raw.strip().upper().replace("-", ":").replace(".", ":")
+    parts = text.split(":")
+    if len(parts) != 6 or any(len(p) != 2 for p in parts):
+        raise ValueError(f"Invalid MAC: {raw}")
+    return ":".join(parts)
+
+
+def mac_to_path_suffix(mac: str) -> str:
+    return "dev_" + mac.replace(":", "_")
+
+
 class Agent(dbus.service.Object):
+    def __init__(self, bus: dbus.SystemBus, path: str) -> None:
+        super().__init__(bus, path)
+        self.confirmed = False
+
     @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
     def DisplayPinCode(self, device, pincode):
         print(f"DisplayPinCode {device} pin={pincode}", flush=True)
@@ -55,7 +72,7 @@ class Agent(dbus.service.Object):
     @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
     def RequestConfirmation(self, device, passkey):
         print(f"AUTO-CONFIRM {device} passkey={passkey:06d}", flush=True)
-        # Returning without error = accept
+        self.confirmed = True
 
     @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
     def RequestPinCode(self, device):
@@ -66,6 +83,10 @@ class Agent(dbus.service.Object):
     def RequestPasskey(self, device):
         print(f"RequestPasskey {device} -> 0", flush=True)
         return dbus.UInt32(0)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        print(f"RequestAuthorization {device} -> accept", flush=True)
 
     @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
     def AuthorizeService(self, device, uuid):
@@ -80,37 +101,225 @@ class Agent(dbus.service.Object):
         print("Release", flush=True)
 
 
-def main() -> int:
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SystemBus()
-    agent = Agent(bus, AGENT_PATH)  # noqa: F841 — must stay referenced
-    manager = dbus.Interface(
-        bus.get_object(BUS_NAME, "/org/bluez"),
-        AGENT_MANAGER_IFACE,
-    )
-    try:
-        manager.RegisterAgent(AGENT_PATH, CAPABILITY)
-        manager.RequestDefaultAgent(AGENT_PATH)
-    except dbus.exceptions.DBusException as exc:
-        print(f"Failed to register agent: {exc}", file=sys.stderr)
-        return 1
+def get_managed_objects(bus: dbus.SystemBus) -> dict:
+    obj = bus.get_object(BUS_NAME, "/")
+    manager = dbus.Interface(obj, OBJECT_MANAGER_IFACE)
+    return manager.GetManagedObjects()
 
-    print(
-        f"Agent registered ({CAPABILITY}) at {AGENT_PATH}.\n"
-        "Now pair with bluetoothctl in another terminal "
-        "(do NOT run 'agent …' there).\n"
-        "Ctrl-C when finished.",
-        flush=True,
-    )
-    loop = GLib.MainLoop()
+
+def find_adapter_path(objects: dict) -> str:
+    for path, ifaces in objects.items():
+        if ADAPTER_IFACE in ifaces:
+            return str(path)
+    raise RuntimeError("No BlueZ adapter found")
+
+
+def find_device_path(objects: dict, mac: str) -> str | None:
+    suffix = mac_to_path_suffix(mac)
+    for path, ifaces in objects.items():
+        if DEVICE_IFACE not in ifaces:
+            continue
+        props = ifaces[DEVICE_IFACE]
+        addr = str(props.get("Address", "")).upper()
+        if addr == mac or str(path).endswith(suffix):
+            return str(path)
+    return None
+
+
+def props_iface(bus: dbus.SystemBus, path: str):
+    return dbus.Interface(bus.get_object(BUS_NAME, path), PROPERTIES_IFACE)
+
+
+def wait_for_device(
+    bus: dbus.SystemBus,
+    adapter_path: str,
+    mac: str,
+    *,
+    seconds: int,
+) -> str:
+    adapter = dbus.Interface(bus.get_object(BUS_NAME, adapter_path), ADAPTER_IFACE)
+    print(f"Discovering up to {seconds}s for {mac}…", flush=True)
     try:
-        loop.run()
-    except KeyboardInterrupt:
-        print("\nStopping agent…", flush=True)
+        adapter.SetDiscoveryFilter({"Transport": "le"})
+    except dbus.exceptions.DBusException:
+        pass
+    adapter.StartDiscovery()
+    try:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            objects = get_managed_objects(bus)
+            path = find_device_path(objects, mac)
+            if path is not None:
+                rssi = props_iface(bus, path).Get(DEVICE_IFACE, "RSSI")
+                print(f"Found {mac} at {path} RSSI={rssi}", flush=True)
+                if isinstance(rssi, int) and rssi < -85:
+                    print(
+                        "WARNING: RSSI is weak (worse than -85). Move closer.",
+                        flush=True,
+                    )
+                return path
+            time.sleep(0.5)
+    finally:
+        try:
+            adapter.StopDiscovery()
+        except dbus.exceptions.DBusException:
+            pass
+    raise TimeoutError(
+        f"{mac} not discovered in {seconds}s. "
+        "Re-enter pairing mode, stand closer, check MAC."
+    )
+
+
+def pair_device(bus: dbus.SystemBus, device_path: str, agent: Agent, timeout_s: int = 45) -> None:
+    import threading
+
+    device = dbus.Interface(bus.get_object(BUS_NAME, device_path), DEVICE_IFACE)
+    props = props_iface(bus, device_path)
+
+    try:
+        props.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+        print("Trusted=yes", flush=True)
+    except dbus.exceptions.DBusException as exc:
+        print(f"trust warning: {exc}", flush=True)
+
+    paired = bool(props.Get(DEVICE_IFACE, "Paired"))
+    if paired:
+        print("Already Paired: yes", flush=True)
+        return
+
+    print(f"Calling Pair() on {device_path}…", flush=True)
+    # Pair() blocks; agent D-Bus callbacks need the GLib loop on the main thread.
+    error: list[BaseException] = []
+    done = {"ok": False}
+    loop = GLib.MainLoop()
+
+    def _do_pair() -> None:
+        try:
+            device.Pair()
+            done["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+        GLib.idle_add(loop.quit)
+
+    thread = threading.Thread(target=_do_pair, name="bluez-pair", daemon=True)
+    thread.start()
+
+    def _watchdog():
+        if not thread.is_alive():
+            loop.quit()
+            return False
+        return True
+
+    GLib.timeout_add(500, _watchdog)
+    GLib.timeout_add(timeout_s * 1000, loop.quit)
+    loop.run()
+    thread.join(timeout=5)
+
+    if error:
+        raise error[0]
+    if not done["ok"]:
+        raise TimeoutError("Pair() timed out")
+
+    paired = bool(props.Get(DEVICE_IFACE, "Paired"))
+    try:
+        bonded = bool(props.Get(DEVICE_IFACE, "Bonded"))
+    except dbus.exceptions.DBusException:
+        bonded = paired
+    print(f"Result: Paired={paired} Bonded={bonded} confirmed={agent.confirmed}", flush=True)
+    if not paired:
+        raise RuntimeError("Pair() returned but device is not Paired")
+
+
+def register_agent(bus: dbus.SystemBus) -> tuple[Agent, dbus.Interface]:
+    agent = Agent(bus, AGENT_PATH)
+    manager = dbus.Interface(bus.get_object(BUS_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
     try:
         manager.UnregisterAgent(AGENT_PATH)
     except dbus.exceptions.DBusException:
         pass
+    manager.RegisterAgent(AGENT_PATH, CAPABILITY)
+    manager.RequestDefaultAgent(AGENT_PATH)
+    print(f"Agent registered ({CAPABILITY}) at {AGENT_PATH}", flush=True)
+    return agent, manager
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Gira BlueZ auto-confirm pair agent")
+    parser.add_argument("mac", nargs="?", help="Device MAC to discover + Pair()")
+    parser.add_argument(
+        "-s",
+        "--seconds",
+        type=int,
+        default=30,
+        help="Discovery window when MAC given (default 30)",
+    )
+    args = parser.parse_args()
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    agent, manager = register_agent(bus)
+
+    if not args.mac:
+        print(
+            "Idle mode: pair with bluetoothctl in another terminal,\n"
+            "but run 'agent off' there first so this agent stays default.\n"
+            "Ctrl-C when finished.",
+            flush=True,
+        )
+        loop = GLib.MainLoop()
+        try:
+            loop.run()
+        except KeyboardInterrupt:
+            print("\nStopping…", flush=True)
+        try:
+            manager.UnregisterAgent(AGENT_PATH)
+        except dbus.exceptions.DBusException:
+            pass
+        return 0
+
+    try:
+        mac = normalize_mac(args.mac)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    print(
+        f"Target {mac}\n"
+        "Put the device in pairing mode NOW (BT icon / blue LED blinking),\n"
+        "stay within ~1 m (RSSI should be better than about -80).",
+        flush=True,
+    )
+    try:
+        input("Press Enter when the LED is blinking… ")
+    except EOFError:
+        pass
+
+    try:
+        objects = get_managed_objects(bus)
+        adapter_path = find_adapter_path(objects)
+        device_path = find_device_path(objects, mac)
+        if device_path is None:
+            device_path = wait_for_device(bus, adapter_path, mac, seconds=args.seconds)
+        else:
+            print(f"Already in cache: {device_path}", flush=True)
+
+        # Re-assert default agent in case bluetoothctl stole it earlier.
+        manager.RequestDefaultAgent(AGENT_PATH)
+        pair_device(bus, device_path, agent)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        try:
+            manager.UnregisterAgent(AGENT_PATH)
+        except dbus.exceptions.DBusException:
+            pass
+        return 1
+
+    try:
+        manager.UnregisterAgent(AGENT_PATH)
+    except dbus.exceptions.DBusException:
+        pass
+
+    print(f"OK: {mac} should be paired. Restart gira-ble-api and retry the API.", flush=True)
     return 0
 
 
