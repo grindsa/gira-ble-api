@@ -167,25 +167,45 @@ btmgmt power on >/dev/null
 btmgmt connectable on >/dev/null
 btmgmt bondable on >/dev/null
 
-echo "==> Scanning ${SCAN_SECONDS}s (scan stays on through pair)…"
-bluetoothctl scan on >/dev/null 2>&1 || true
-sleep "${SCAN_SECONDS}"
+echo "==> Scanning up to ${SCAN_SECONDS}s (exits early when ${MAC} appears;"
+echo "    scan stays on through pair). Start pairing mode, then press Enter"
+echo "    immediately — Gira windows are often shorter than a long -s."
 
-if ! device_seen; then
+if ! bluetoothctl scan on >/dev/null 2>&1; then
+  echo "ERROR: 'bluetoothctl scan on' failed. Is bluetoothd running?" >&2
+  echo "  sudo systemctl start bluetooth" >&2
+  exit 1
+fi
+
+SEEN=0
+for ((elapsed = 1; elapsed <= SCAN_SECONDS; elapsed++)); do
+  sleep 1
+  if device_seen; then
+    SEEN=1
+    echo "==> Seen after ${elapsed}s: $(bluetoothctl devices 2>/dev/null | grep -i "${MAC}" || true)"
+    break
+  fi
+  if ((elapsed % 5 == 0)); then
+    count="$(bluetoothctl devices 2>/dev/null | wc -l | tr -d ' ')"
+    echo "    … ${elapsed}s, ${count} device(s) in BlueZ cache (target not yet)"
+  fi
+done
+
+if [[ "${SEEN}" -ne 1 ]]; then
   if [[ "${FORCE_PAIR}" -eq 1 ]]; then
     echo "WARNING: ${MAC} not seen during scan — continuing because --force."
   else
     bluetoothctl scan off >/dev/null 2>&1 || true
     echo "ERROR: ${MAC} was not discovered during the ${SCAN_SECONDS}s scan." >&2
-    echo "  - Re-enter pairing mode (icon/LED must still be blinking)" >&2
+    echo "  Nearby devices BlueZ did see:" >&2
+    bluetoothctl devices 2>/dev/null | sed 's/^/    /' >&2 || echo "    (none)" >&2
+    echo "  - Re-enter pairing mode and press Enter as soon as LED blinks" >&2
+    echo "  - Confirm MAC with: gira-ble-api scan  (or bluetoothctl scan on)" >&2
     echo "  - Stand closer; forget phone/Gira-app bond for this unit" >&2
     echo "  - Do NOT kill bluetoothd — only stop ${SERVICE_NAME}" >&2
-    echo "  - Retry with a longer window: -s 45" >&2
-    echo "  - Or override: --force (usually still fails if not advertising)" >&2
+    echo "  - --force usually still fails if the unit is not advertising" >&2
     exit 1
   fi
-else
-  echo "==> Seen in scan: $(bluetoothctl devices 2>/dev/null | grep -i "${MAC}" || true)"
 fi
 
 echo "==> Starting User Confirm auto-acceptor"
