@@ -93,22 +93,29 @@ def create_app(
 
     async def _heating_poll_loop() -> None:
         interval = config.heating_poll_s
+        gap_s = max(1.0, config.heating_poll_gap_s)
+        settle_s = min(30.0, max(5.0, config.online_timeout_s / 4.0))
         logger.info(
             "Heating status background poll every %.0fs (%d thermostat(s)); "
-            "first poll runs immediately",
+            "settle %.0fs before first poll, %.0fs ad gap between devices",
             interval,
             len(config.thermostats),
+            settle_s,
+            gap_s,
         )
+        # Let passive ads populate last_seen before the first scanner pause.
+        await asyncio.sleep(settle_s)
         while True:
             if controller is not None:
                 for thermo in config.thermostats:
                     try:
                         await _refresh_heating(thermo.id)
                         row = store.get(thermo.id)
-                        logger.debug(
+                        heating = None if row is None else row.get("heating_active")
+                        logger.info(
                             "Heating poll ok %s heating_active=%s",
                             thermo.id,
-                            None if row is None else row.get("heating_active"),
+                            heating,
                         )
                     except asyncio.CancelledError:
                         raise
@@ -116,8 +123,8 @@ def create_app(
                         logger.warning(
                             "Heating poll failed for %s: %s", thermo.id, exc
                         )
-                    # Small gap between devices so the adapter can settle.
-                    await asyncio.sleep(1.0)
+                    # Scanner is running again here — collect ads for siblings.
+                    await asyncio.sleep(gap_s)
             await asyncio.sleep(interval)
 
     @asynccontextmanager
@@ -129,6 +136,8 @@ def create_app(
                 on_advertisement=on_ad,
                 ble_timeout_s=max(config.ble_timeout_s, 30.0),
                 heating_listen_s=config.heating_listen_s,
+                on_scan_pause=store.begin_scan_pause,
+                on_scan_resume=store.end_scan_pause,
             )
             app.state.controller = controller
             try:

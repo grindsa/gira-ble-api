@@ -77,6 +77,9 @@ class AppConfig(BaseModel):
     # How long to keep GATT open waiting for property 0xF8 after connect/write.
     # Returns early once heating_active arrives (often ~10–15s after provoke).
     heating_listen_s: float = 20.0
+    # After each thermostat GATT poll, leave the scanner running this long so
+    # ads can refresh online state for the other devices.
+    heating_poll_gap_s: float = 30.0
     # Empty / omitted → no auth. Comma-separated string or YAML list of Bearer tokens.
     api_tokens: list[str] = Field(default_factory=list)
     thermostats: list[ThermostatConfig] = Field(default_factory=list)

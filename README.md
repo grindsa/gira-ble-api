@@ -123,7 +123,8 @@ Ids and MAC addresses must be unique across thermostats and covers.
 | `ble_timeout_s` | Connect/write timeout for setpoint |
 | `idle_disconnect_s` | Drop GATT after a successful write |
 | `heating_poll_s` | Background GATT poll for `heating_active` (seconds). `0` / omit = off |
-| `heating_listen_s` | Seconds to wait for heating notify after connect/write (default 25) |
+| `heating_listen_s` | Seconds to wait for heating notify after connect/write (default 20) |
+| `heating_poll_gap_s` | Ad-collection window between per-device GATT polls (default 30) |
 
 ## REST API
 
@@ -326,10 +327,10 @@ Thermostat:
   `raw = round((21 + °C) * 50 + 1000)`
 - `heating_active` is not in advertisements; a GATT connect is required. Status
   polls re-write the known setpoint to provoke the `0xF8` notify.
-- GATT sessions briefly pause the passive scanner (macOS/adapter limitation).
-  A successful status poll refreshes `last_seen_at` so the polled thermostat
-  does not flip `online: false`. Other devices may still miss ads during that
-  window — keep `online_timeout_s` comfortably above one poll cycle.
+- GATT sessions briefly pause the passive scanner (adapter limitation). While
+  paused, `online` ageing is frozen so a multi-device heating poll does not
+  mark everyone offline. After each device, `heating_poll_gap_s` leaves the
+  scanner running so ads can catch up.
 
 Cover (object `0x0320`):
 

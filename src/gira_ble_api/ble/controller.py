@@ -44,7 +44,9 @@ class BleController:
         *,
         ble_timeout_s: float = 30.0,
         connect_attempts: int = 3,
-        heating_listen_s: float = 25.0,
+        heating_listen_s: float = 20.0,
+        on_scan_pause=None,
+        on_scan_resume=None,
     ) -> None:
         self._macs = {normalize_mac(m) for m in macs}
         self._ble_timeout_s = ble_timeout_s
@@ -55,6 +57,8 @@ class BleController:
         self._seen_at: dict[str, float] = {}
         self._seen_events: dict[str, asyncio.Event] = {}
         self._user_on_ad = on_advertisement
+        self._on_scan_pause = on_scan_pause
+        self._on_scan_resume = on_scan_resume
         self._scanner = BleScanner(self._macs, self._on_ad)
         # When True, GATT sessions must restore passive scanning afterward.
         self._should_scan = False
@@ -86,16 +90,35 @@ class BleController:
 
     async def _ensure_scanner_restored(self) -> None:
         """Best-effort resume after GATT; recovers from a prior failed resume."""
-        if not self._should_scan or self._scanner.running:
+        if not self._should_scan:
             return
         try:
-            await self._scanner.start()
-            logger.info("Resumed BLE scanner")
+            if not self._scanner.running:
+                await self._scanner.start()
+                logger.info("Resumed BLE scanner")
         except Exception:
             logger.exception("Failed to resume BLE scanner")
+        finally:
+            if self._on_scan_resume is not None:
+                try:
+                    self._on_scan_resume()
+                except Exception:
+                    logger.exception("on_scan_resume callback failed")
+
+    def _session_timeout_s(self, listen_s: float) -> float:
+        # Connect + optional write + listen + disconnect slack.
+        return self._ble_timeout_s + listen_s + self._ble_timeout_s + 15.0
+
+    async def _safe_disconnect(self, client: BleakClient, address: str) -> None:
+        try:
+            if client.is_connected:
+                await asyncio.wait_for(client.disconnect(), timeout=5.0)
+        except Exception:  # noqa: BLE001
+            logger.debug("disconnect error for %s", address, exc_info=True)
 
     async def write_command(self, mac: str, payload: bytes) -> AdvertisementUpdate:
         """Wait for fresh ad → pause scan → connect/write → listen → resume."""
+        listen_s = self._heating_listen_s
         return await self._with_exclusive_gatt(
             mac,
             lambda address, device, attempt: self._connect_write_listen(
@@ -103,8 +126,9 @@ class BleController:
                 device=device,
                 attempt=attempt,
                 payload=payload,
-                listen_s=self._heating_listen_s,
+                listen_s=listen_s,
             ),
+            session_timeout_s=self._session_timeout_s(listen_s),
         )
 
     async def fetch_thermostat_status(
@@ -114,6 +138,7 @@ class BleController:
         provoke_setpoint_c: float | None = None,
     ) -> AdvertisementUpdate:
         """Connect, subscribe, optionally re-write setpoint to provoke 0xF8."""
+        listen_s = self._heating_listen_s
         return await self._with_exclusive_gatt(
             mac,
             lambda address, device, attempt: self._connect_status_listen(
@@ -121,11 +146,18 @@ class BleController:
                 device=device,
                 attempt=attempt,
                 provoke_setpoint_c=provoke_setpoint_c,
-                listen_s=self._heating_listen_s,
+                listen_s=listen_s,
             ),
+            session_timeout_s=self._session_timeout_s(listen_s),
         )
 
-    async def _with_exclusive_gatt(self, mac: str, action) -> AdvertisementUpdate:
+    async def _with_exclusive_gatt(
+        self,
+        mac: str,
+        action,
+        *,
+        session_timeout_s: float,
+    ) -> AdvertisementUpdate:
         address = normalize_mac(mac)
         last_error: Exception | None = None
 
@@ -135,8 +167,28 @@ class BleController:
                     device = await self._wait_for_fresh_device(address)
                     if self._scanner.running:
                         logger.info("Pausing BLE scanner for GATT session")
+                        if self._on_scan_pause is not None:
+                            try:
+                                self._on_scan_pause()
+                            except Exception:
+                                logger.exception("on_scan_pause callback failed")
                         await self._scanner.stop()
-                    return await action(address, device, attempt)
+                    return await asyncio.wait_for(
+                        action(address, device, attempt),
+                        timeout=session_timeout_s,
+                    )
+                except TimeoutError:
+                    last_error = BleCommandError(
+                        f"GATT session timed out after {session_timeout_s:.0f}s",
+                        code="ble_timeout",
+                    )
+                    logger.warning(
+                        "GATT attempt %d/%d timed out for %s",
+                        attempt,
+                        self._connect_attempts,
+                        address,
+                    )
+                    await asyncio.sleep(0.3 * attempt)
                 except BleCommandError as exc:
                     last_error = exc
                     if exc.code == "not_found":
@@ -302,11 +354,7 @@ class BleController:
             await self._wait_for_heating(heating_event, listen_s)
             return merged
         finally:
-            try:
-                if client.is_connected:
-                    await client.disconnect()
-            except Exception:  # noqa: BLE001
-                logger.debug("disconnect error for %s", address, exc_info=True)
+            await self._safe_disconnect(client, address)
 
     async def _connect_status_listen(
         self,
@@ -342,7 +390,13 @@ class BleController:
                 if update.heating_active is not None:
                     heating_event.set()
 
-            await client.start_notify(GIRA_READ_CHAR_UUID, _on_notify)
+            try:
+                await asyncio.wait_for(
+                    client.start_notify(GIRA_READ_CHAR_UUID, _on_notify),
+                    timeout=self._ble_timeout_s,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("start_notify failed on %s: %s", address, exc)
 
             # Re-writing the known setpoint provokes property 0xF8; idle subscribe alone
             # often only yields temperature frames.
@@ -367,13 +421,15 @@ class BleController:
                 )
 
             await self._wait_for_heating(heating_event, listen_s)
+            if merged.heating_active is None:
+                logger.info(
+                    "No heating_active (0xF8) notify from %s within %.0fs",
+                    address,
+                    listen_s,
+                )
             return merged
         finally:
-            try:
-                if client.is_connected:
-                    await client.disconnect()
-            except Exception:  # noqa: BLE001
-                logger.debug("disconnect error for %s", address, exc_info=True)
+            await self._safe_disconnect(client, address)
 
     async def _wait_for_heating(self, heating_event: asyncio.Event, listen_s: float) -> None:
         try:

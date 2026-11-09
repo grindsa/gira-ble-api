@@ -33,11 +33,12 @@ class ThermostatState:
         *,
         online_timeout_s: float,
         paired: bool | None = None,
+        now: datetime | None = None,
     ) -> dict:
-        now = _utcnow()
+        ref = now if now is not None else _utcnow()
         online = False
         if self.last_seen_at is not None:
-            online = (now - self.last_seen_at).total_seconds() <= online_timeout_s
+            online = (ref - self.last_seen_at).total_seconds() <= online_timeout_s
         return {
             "id": self.id,
             "name": self.name,
@@ -73,11 +74,12 @@ class CoverState:
         *,
         online_timeout_s: float,
         paired: bool | None = None,
+        now: datetime | None = None,
     ) -> dict:
-        now = _utcnow()
+        ref = now if now is not None else _utcnow()
         online = False
         if self.last_seen_at is not None:
-            online = (now - self.last_seen_at).total_seconds() <= online_timeout_s
+            online = (ref - self.last_seen_at).total_seconds() <= online_timeout_s
         return {
             "id": self.id,
             "name": self.name,
@@ -103,6 +105,24 @@ class DeviceStore:
     _mac_to_kind: dict[str, Kind] = field(default_factory=dict)
     _mac_to_id: dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    # While the passive scanner is paused for GATT, freeze online ageing at
+    # this timestamp so a multi-device heating poll does not mark everyone offline.
+    _scan_paused_since: datetime | None = None
+
+    def begin_scan_pause(self) -> None:
+        with self._lock:
+            if self._scan_paused_since is None:
+                self._scan_paused_since = _utcnow()
+
+    def end_scan_pause(self) -> None:
+        with self._lock:
+            self._scan_paused_since = None
+
+    def _online_reference_now(self) -> datetime:
+        """Wall clock, or pause start while the scanner is stopped for GATT."""
+        if self._scan_paused_since is not None:
+            return self._scan_paused_since
+        return _utcnow()
 
     @classmethod
     def from_config(
@@ -127,13 +147,18 @@ class DeviceStore:
         self, *, paired_by_mac: dict[str, bool | None] | None = None
     ) -> list[dict]:
         with self._lock:
+            now = self._online_reference_now()
             out: list[dict] = []
             for s in self._thermostats.values():
                 paired = None
                 if paired_by_mac is not None:
                     paired = paired_by_mac.get(s.mac)
                 out.append(
-                    s.to_dict(online_timeout_s=self.online_timeout_s, paired=paired)
+                    s.to_dict(
+                        online_timeout_s=self.online_timeout_s,
+                        paired=paired,
+                        now=now,
+                    )
                 )
             return out
 
@@ -141,13 +166,18 @@ class DeviceStore:
         self, *, paired_by_mac: dict[str, bool | None] | None = None
     ) -> list[dict]:
         with self._lock:
+            now = self._online_reference_now()
             out: list[dict] = []
             for s in self._covers.values():
                 paired = None
                 if paired_by_mac is not None:
                     paired = paired_by_mac.get(s.mac)
                 out.append(
-                    s.to_dict(online_timeout_s=self.online_timeout_s, paired=paired)
+                    s.to_dict(
+                        online_timeout_s=self.online_timeout_s,
+                        paired=paired,
+                        now=now,
+                    )
                 )
             return out
 
@@ -168,6 +198,7 @@ class DeviceStore:
             return state.to_dict(
                 online_timeout_s=self.online_timeout_s,
                 paired=paired,
+                now=self._online_reference_now(),
             )
 
     def get_cover(
@@ -183,6 +214,7 @@ class DeviceStore:
             return state.to_dict(
                 online_timeout_s=self.online_timeout_s,
                 paired=paired,
+                now=self._online_reference_now(),
             )
 
     def get_mac(self, thermostat_id: str) -> str | None:
