@@ -56,6 +56,8 @@ class BleController:
         self._seen_events: dict[str, asyncio.Event] = {}
         self._user_on_ad = on_advertisement
         self._scanner = BleScanner(self._macs, self._on_ad)
+        # When True, GATT sessions must restore passive scanning afterward.
+        self._should_scan = False
 
     def _event_for(self, address: str) -> asyncio.Event:
         if address not in self._seen_events:
@@ -75,10 +77,22 @@ class BleController:
         self._user_on_ad(mac, update, rssi)
 
     async def start(self) -> None:
+        self._should_scan = True
         await self._scanner.start()
 
     async def stop(self) -> None:
+        self._should_scan = False
         await self._scanner.stop()
+
+    async def _ensure_scanner_restored(self) -> None:
+        """Best-effort resume after GATT; recovers from a prior failed resume."""
+        if not self._should_scan or self._scanner.running:
+            return
+        try:
+            await self._scanner.start()
+            logger.info("Resumed BLE scanner")
+        except Exception:
+            logger.exception("Failed to resume BLE scanner")
 
     async def write_command(self, mac: str, payload: bytes) -> AdvertisementUpdate:
         """Wait for fresh ad → pause scan → connect/write → listen → resume."""
@@ -117,10 +131,9 @@ class BleController:
 
         async with self._adapter_lock:
             for attempt in range(1, self._connect_attempts + 1):
-                was_running = self._scanner.running
                 try:
                     device = await self._wait_for_fresh_device(address)
-                    if was_running:
+                    if self._scanner.running:
                         logger.info("Pausing BLE scanner for GATT session")
                         await self._scanner.stop()
                     return await action(address, device, attempt)
@@ -149,12 +162,7 @@ class BleController:
                     self._seen_at.pop(address, None)
                     await asyncio.sleep(0.3 * attempt)
                 finally:
-                    if was_running and not self._scanner.running:
-                        try:
-                            await self._scanner.start()
-                            logger.info("Resumed BLE scanner")
-                        except Exception:
-                            logger.exception("Failed to resume BLE scanner")
+                    await self._ensure_scanner_restored()
 
         assert last_error is not None
         raise self._wrap_final_error(address, last_error) from last_error

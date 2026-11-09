@@ -75,7 +75,8 @@ class AppConfig(BaseModel):
     # Set e.g. 120 to poll every 2 minutes on the Pi.
     heating_poll_s: float = 0.0
     # How long to keep GATT open waiting for property 0xF8 after connect/write.
-    heating_listen_s: float = 25.0
+    # Returns early once heating_active arrives (often ~10–15s after provoke).
+    heating_listen_s: float = 20.0
     # Empty / omitted → no auth. Comma-separated string or YAML list of Bearer tokens.
     api_tokens: list[str] = Field(default_factory=list)
     thermostats: list[ThermostatConfig] = Field(default_factory=list)

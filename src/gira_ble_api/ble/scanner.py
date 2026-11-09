@@ -80,6 +80,7 @@ class BleScanner:
         if (
             update.temperature_c is None
             and update.setpoint_c is None
+            and update.heating_active is None
             and update.position_pct is None
         ):
             return

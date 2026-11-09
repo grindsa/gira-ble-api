@@ -246,17 +246,35 @@ class DeviceStore:
             state = self._thermostats.get(thermostat_id)
             return state.setpoint_c if state else None
 
-    def apply_status_update(
-        self,
-        thermostat_id: str,
-        update: AdvertisementUpdate,
-    ) -> None:
-        """Merge GATT-notify fields (heating / temp / setpoint) into state."""
+    def touch_last_seen(self, thermostat_id: str) -> None:
+        """Record that we heard from the device (e.g. GATT connect).
+
+        Keeps ``online`` true while the scanner is paused for a status poll.
+        """
         with self._lock:
             state = self._thermostats.get(thermostat_id)
             if state is None:
                 return
             now = _utcnow()
+            state.last_seen_at = now
+            state.updated_at = now
+
+    def apply_status_update(
+        self,
+        thermostat_id: str,
+        update: AdvertisementUpdate,
+    ) -> None:
+        """Merge GATT-notify fields (heating / temp / setpoint) into state.
+
+        Also refreshes ``last_seen_at``: a live GATT session means the device
+        is reachable even while passive scanning is paused.
+        """
+        with self._lock:
+            state = self._thermostats.get(thermostat_id)
+            if state is None:
+                return
+            now = _utcnow()
+            state.last_seen_at = now
             state.updated_at = now
             state.error = None
             if update.temperature_c is not None:

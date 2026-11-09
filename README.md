@@ -164,7 +164,7 @@ Thermostat (`GET /thermostats/{id}`):
 | --- | --- |
 | `temperature_c` / `setpoint_c` | From BLE ads (null until first ad) |
 | `heating_active` | GATT-only: `true` / `false`, or `null` until a status poll / setpoint write |
-| `online` | Ad seen within `online_timeout_s` |
+| `online` | Heard from within `online_timeout_s` (BLE ad **or** successful GATT status) |
 | `paired` | Host OS bond status (`true`/`false`, or `null` if unknown) |
 | `last_seen_at` | Last BLE advertisement (null until first ad) |
 | `updated_at` | Last local state change (ad, optimistic write, status poll, or error) |
@@ -326,6 +326,10 @@ Thermostat:
   `raw = round((21 + °C) * 50 + 1000)`
 - `heating_active` is not in advertisements; a GATT connect is required. Status
   polls re-write the known setpoint to provoke the `0xF8` notify.
+- GATT sessions briefly pause the passive scanner (macOS/adapter limitation).
+  A successful status poll refreshes `last_seen_at` so the polled thermostat
+  does not flip `online: false`. Other devices may still miss ads during that
+  window — keep `online_timeout_s` comfortably above one poll cycle.
 
 Cover (object `0x0320`):
 
