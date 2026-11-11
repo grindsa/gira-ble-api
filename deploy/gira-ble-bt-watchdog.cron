@@ -1,0 +1,15 @@
+# gira-ble-api BLE adapter watchdog
+# Install:
+#   sudo cp /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog.cron \
+#     /etc/cron.d/gira-ble-bt-watchdog
+#   sudo chmod 644 /etc/cron.d/gira-ble-bt-watchdog
+#   sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog \
+#     /usr/local/bin/gira-ble-bt-watchdog
+#
+# Manual force recovery:
+#   sudo gira-ble-bt-watchdog --hard-reset
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/15 * * * * root /usr/local/bin/gira-ble-bt-watchdog

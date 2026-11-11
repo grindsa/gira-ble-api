@@ -1,0 +1,425 @@
+#!/usr/local/lib/gira-ble-api/.venv/bin/python3
+# BLE adapter watchdog for gira-ble-api on Raspberry Pi / Linux.
+#
+# Install:
+#   sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog \
+#     /usr/local/bin/gira-ble-bt-watchdog
+#   sudo cp /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog.cron \
+#     /etc/cron.d/gira-ble-bt-watchdog
+#   sudo chmod 644 /etc/cron.d/gira-ble-bt-watchdog
+#   # optional WhatsApp: pip install wa_hack_cli into the venv, then set
+#   # notify.whatsapp in /usr/local/etc/gira-ble-api/config.yaml
+#
+# Usage:
+#   sudo gira-ble-bt-watchdog              # check + recover if needed
+#   sudo gira-ble-bt-watchdog --hard-reset # force recovery (+ notify)
+#   sudo gira-ble-bt-watchdog --dry-run
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    print("PyYAML required (use the gira-ble-api venv python)", file=sys.stderr)
+    sys.exit(2)
+
+LOG = logging.getLogger("gira-ble-bt-watchdog")
+
+DEFAULT_CONFIG = Path(
+    os.environ.get("GIRA_BLE_CONFIG", "/usr/local/etc/gira-ble-api/config.yaml")
+)
+DEFAULT_STATE = Path(
+    os.environ.get(
+        "GIRA_BLE_WATCHDOG_STATE", "/var/lib/gira-ble-api/watchdog-state.json"
+    )
+)
+DEFAULT_SERVICE = os.environ.get("GIRA_BLE_SERVICE", "gira-ble-api")
+
+# Kernel lines seen when the Realtek USB stick dies.
+RTL_PATTERNS = (
+    re.compile(r"RTL:\s*hw err", re.I),
+    re.compile(r"HCI reset during shutdown failed", re.I),
+    re.compile(r"trigger devcoredump", re.I),
+)
+
+
+@dataclass
+class WhatsAppConfig:
+    enabled: bool = False
+    server: str = ""
+    port: int = 9009
+    to: str = ""
+
+
+@dataclass
+class WatchdogConfig:
+    journal_lookback_min: int = 20
+    rate_limit_min: int = 14
+    adapter_wait_s: int = 20
+    whatsapp: WhatsAppConfig | None = None
+
+
+def setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    root = logging.getLogger()
+    root.setLevel(level)
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s [gira-ble-bt-watchdog] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    # Cron has no TTY — also mirror into the system journal when available.
+    dev_log = Path("/dev/log")
+    if dev_log.exists():
+        try:
+            from logging.handlers import SysLogHandler
+
+            syslog = SysLogHandler(address=str(dev_log))
+            syslog.setFormatter(
+                logging.Formatter("gira-ble-bt-watchdog[%(process)d]: %(message)s")
+            )
+            # Facility local0; ident comes from the message prefix above on many Pi images.
+            root.addHandler(syslog)
+        except OSError:
+            pass
+
+
+def run(
+    args: list[str],
+    *,
+    check: bool = False,
+    timeout: float = 60.0,
+) -> subprocess.CompletedProcess[str]:
+    LOG.debug("exec: %s", " ".join(args))
+    return subprocess.run(
+        args,
+        check=check,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def load_watchdog_config(path: Path) -> WatchdogConfig:
+    cfg = WatchdogConfig()
+    if not path.is_file():
+        LOG.warning("config not found (%s); using defaults", path)
+        return cfg
+
+    raw: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        LOG.warning("config root is not a mapping; using defaults")
+        return cfg
+
+    wd = raw.get("watchdog") or {}
+    if isinstance(wd, dict):
+        cfg.journal_lookback_min = int(
+            wd.get("journal_lookback_min", cfg.journal_lookback_min)
+        )
+        cfg.rate_limit_min = int(wd.get("rate_limit_min", cfg.rate_limit_min))
+        cfg.adapter_wait_s = int(wd.get("adapter_wait_s", cfg.adapter_wait_s))
+
+    notify = raw.get("notify") or {}
+    wa_raw = {}
+    if isinstance(notify, dict):
+        wa_raw = notify.get("whatsapp") or {}
+    if isinstance(wa_raw, dict) and wa_raw:
+        wa = WhatsAppConfig(
+            enabled=bool(wa_raw.get("enabled", False)),
+            server=str(wa_raw.get("server", "") or "").strip(),
+            port=int(wa_raw.get("port", 9009)),
+            to=str(wa_raw.get("to", "") or "").strip(),
+        )
+        if wa.enabled and (not wa.server or not wa.to):
+            LOG.warning(
+                "notify.whatsapp.enabled but server/to incomplete — notify disabled"
+            )
+            wa.enabled = False
+        cfg.whatsapp = wa
+    return cfg
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.warning("ignoring bad state file %s: %s", path, exc)
+        return {}
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def adapter_powered() -> bool:
+    """True if BlueZ reports at least one powered adapter."""
+    try:
+        proc = run(["bluetoothctl", "show"], timeout=15.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        LOG.warning("bluetoothctl show failed: %s", exc)
+        return False
+    if proc.returncode != 0:
+        LOG.debug("bluetoothctl show rc=%s stderr=%s", proc.returncode, proc.stderr)
+        # No default adapter → treat as down.
+        return False
+    for line in proc.stdout.splitlines():
+        if line.strip().lower().startswith("powered:"):
+            return line.strip().split(":", 1)[-1].strip().lower() == "yes"
+    return False
+
+
+def list_hci_ifaces() -> list[str]:
+    sys_bt = Path("/sys/class/bluetooth")
+    if not sys_bt.is_dir():
+        return []
+    return sorted(p.name for p in sys_bt.iterdir() if p.name.startswith("hci"))
+
+
+def journal_rtl_hits(lookback_min: int) -> list[str]:
+    """Return matching kernel log lines from the lookback window."""
+    since = f"{max(1, lookback_min)} minutes ago"
+    try:
+        proc = run(
+            ["journalctl", "-k", "--since", since, "--no-pager", "-o", "cat"],
+            timeout=30.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        LOG.warning("journalctl failed: %s", exc)
+        return []
+    if proc.returncode != 0:
+        # No persistent journal still returns some current-boot lines usually;
+        # treat empty/failure as no hits.
+        LOG.debug("journalctl rc=%s stderr=%s", proc.returncode, proc.stderr.strip())
+    hits: list[str] = []
+    for line in proc.stdout.splitlines():
+        if any(pat.search(line) for pat in RTL_PATTERNS):
+            hits.append(line.strip())
+    return hits
+
+
+def rate_limited(state: dict[str, Any], rate_limit_min: int) -> bool:
+    last = state.get("last_recovery_ts")
+    if not isinstance(last, (int, float)):
+        return False
+    return (time.time() - float(last)) < (rate_limit_min * 60)
+
+
+def power_on_adapters(*, dry_run: bool) -> None:
+    if dry_run:
+        LOG.info("DRY-RUN: rfkill unblock + bluetoothctl power on + hci up")
+        return
+    try:
+        run(["rfkill", "unblock", "bluetooth"], timeout=15.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        LOG.warning("rfkill unblock failed: %s", exc)
+    try:
+        run(["bluetoothctl", "power", "on"], timeout=20.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        LOG.warning("bluetoothctl power on failed: %s", exc)
+    for hci in list_hci_ifaces():
+        # hciconfig is deprecated but still useful on Pi images.
+        try:
+            run(["hciconfig", hci, "up"], timeout=15.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def restart_unit(unit: str, *, dry_run: bool) -> None:
+    if dry_run:
+        LOG.info("DRY-RUN: systemctl restart %s", unit)
+        return
+    proc = run(["systemctl", "restart", unit], timeout=120.0)
+    if proc.returncode != 0:
+        LOG.error(
+            "systemctl restart %s failed: %s",
+            unit,
+            (proc.stderr or proc.stdout).strip(),
+        )
+
+
+def wait_for_powered(timeout_s: int) -> bool:
+    deadline = time.time() + max(1, timeout_s)
+    while time.time() < deadline:
+        if adapter_powered():
+            return True
+        time.sleep(1.0)
+    return adapter_powered()
+
+
+def recover(*, cfg: WatchdogConfig, dry_run: bool, hard_reset: bool) -> bool:
+    """Attempt to bring BT back and restart the API. Return True if adapter powered."""
+    LOG.warning(
+        "starting recovery (hard_reset=%s dry_run=%s)", hard_reset, dry_run
+    )
+    power_on_adapters(dry_run=dry_run)
+    if dry_run or not adapter_powered():
+        if not dry_run:
+            LOG.warning("adapter still down — restarting bluetooth.service")
+        restart_unit("bluetooth", dry_run=dry_run)
+        if not dry_run:
+            time.sleep(2.0)
+        power_on_adapters(dry_run=dry_run)
+
+    if not dry_run:
+        ok = wait_for_powered(cfg.adapter_wait_s)
+        if not ok:
+            LOG.error("adapter still not powered after bluetooth restart")
+    else:
+        ok = True
+
+    restart_unit(DEFAULT_SERVICE, dry_run=dry_run)
+    if dry_run:
+        return True
+    # Give API a moment; powered state is what we care about for BT.
+    return ok and adapter_powered()
+
+
+def send_whatsapp(wa: WhatsAppConfig, message: str, *, dry_run: bool) -> None:
+    if not wa.enabled:
+        return
+    if dry_run:
+        LOG.info("DRY-RUN WhatsApp to %s: %s", wa.to, message)
+        return
+    try:
+        from wa_hack_cli import simple_send
+    except ImportError:
+        LOG.error(
+            "wa_hack_cli not installed in this Python — "
+            "pip install wa_hack_cli into the gira-ble-api venv"
+        )
+        return
+    try:
+        simple_send(wa.server, wa.port, wa.to, message)
+        LOG.info("WhatsApp notify sent to %s", wa.to)
+    except Exception:  # noqa: BLE001
+        LOG.exception("WhatsApp notify failed")
+
+
+def build_message(reason: str, recovered: bool, detail: str = "") -> str:
+    host = os.uname().nodename
+    status = "OK" if recovered else "FAILED"
+    parts = [
+        f"gira-ble-bt-watchdog on {host}: recovery {status}",
+        f"reason: {reason}",
+    ]
+    if detail:
+        parts.append(detail[:300])
+    return "\n".join(parts)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Watch BlueZ adapter health and restart gira-ble-api if needed"
+    )
+    p.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help=f"config.yaml path (default: {DEFAULT_CONFIG})",
+    )
+    p.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_STATE,
+        help=f"state file path (default: {DEFAULT_STATE})",
+    )
+    p.add_argument(
+        "--hard-reset",
+        action="store_true",
+        help="force recovery even if the adapter looks healthy",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="check / show actions without changing the system",
+    )
+    p.add_argument("-v", "--verbose", action="store_true")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    setup_logging(args.verbose)
+    cfg = load_watchdog_config(args.config)
+    state = load_state(args.state)
+    wa = cfg.whatsapp or WhatsAppConfig()
+
+    powered = adapter_powered()
+    rtl_hits = journal_rtl_hits(cfg.journal_lookback_min)
+    LOG.info(
+        "check: powered=%s rtl_hits=%d hard_reset=%s",
+        powered,
+        len(rtl_hits),
+        args.hard_reset,
+    )
+    if rtl_hits:
+        for line in rtl_hits[:5]:
+            LOG.warning("RTL/journal: %s", line)
+
+    reasons: list[str] = []
+    if args.hard_reset:
+        reasons.append("hard-reset")
+    if not powered:
+        reasons.append("adapter-not-powered")
+    if rtl_hits:
+        reasons.append("rtl-hw-err")
+
+    if not reasons:
+        LOG.info("healthy — nothing to do")
+        state["last_ok_ts"] = time.time()
+        if not args.dry_run:
+            save_state(args.state, state)
+        return 0
+
+    reason = "+".join(reasons)
+    if (
+        not args.hard_reset
+        and rate_limited(state, cfg.rate_limit_min)
+    ):
+        LOG.warning(
+            "recovery needed (%s) but rate-limited (last recovery < %d min) — skip",
+            reason,
+            cfg.rate_limit_min,
+        )
+        return 0
+
+    recovered = recover(cfg=cfg, dry_run=args.dry_run, hard_reset=args.hard_reset)
+    detail = rtl_hits[0] if rtl_hits else ""
+    msg = build_message(reason, recovered, detail)
+    LOG.warning(msg.replace("\n", " | "))
+    send_whatsapp(wa, msg, dry_run=args.dry_run)
+
+    if not args.dry_run:
+        state["last_recovery_ts"] = time.time()
+        state["last_reason"] = reason
+        state["last_recovered"] = recovered
+        if recovered:
+            state["last_ok_ts"] = time.time()
+        save_state(args.state, state)
+
+    return 0 if recovered else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

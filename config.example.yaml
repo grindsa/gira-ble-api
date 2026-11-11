@@ -35,6 +35,23 @@ heating_listen_s: 20
 # can refresh ads / online state before the next GATT pause.
 heating_poll_gap_s: 30
 
+# Optional BLE watchdog (deploy/gira-ble-bt-watchdog + /etc/cron.d).
+# Checks adapter power + Realtek HCI crash lines every 15 minutes via cron.
+# Unknown to the API process — only the watchdog script reads these keys.
+watchdog:
+  journal_lookback_min: 20   # slightly above the 15m cron interval
+  rate_limit_min: 14         # skip auto-recovery if one ran recently
+  adapter_wait_s: 20
+
+# Optional WhatsApp alerts when the watchdog recovers (wa_hack_cli).
+# Install into the venv:  .venv/bin/pip install wa_hack_cli
+notify:
+  whatsapp:
+    enabled: false
+    server: "127.0.0.1"   # WA bridge host (tipp_game WA_SRV)
+    port: 9009            # WA_PORT
+    to: ""                # WA_ADMIN_NUMBER / destination
+
 thermostats:
   - id: living
     name: Wohnzimmer

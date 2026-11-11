@@ -128,6 +128,67 @@ quit
 
 Confirm `Paired: yes` / `Bonded: yes`, then `sudo systemctl start gira-ble-api`.
 
+## BLE watchdog (cron)
+
+Recovers a dead BlueZ adapter (powered-off / Realtek `RTL: hw err`) and restarts
+`gira-ble-api`. Runs every 15 minutes from `/etc/cron.d`.
+
+```bash
+sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog \
+  /usr/local/bin/gira-ble-bt-watchdog
+sudo cp /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog.cron \
+  /etc/cron.d/gira-ble-bt-watchdog
+sudo chmod 644 /etc/cron.d/gira-ble-bt-watchdog
+
+# optional WhatsApp (same simple_send API as tipp_game)
+sudo -u gira-ble /usr/local/lib/gira-ble-api/.venv/bin/pip install wa_hack_cli
+sudo edit /usr/local/etc/gira-ble-api/config.yaml   # notify.whatsapp.enabled: true
+```
+
+Config keys (ignored by the API process itself):
+
+```yaml
+watchdog:
+  journal_lookback_min: 20
+  rate_limit_min: 14
+  adapter_wait_s: 20
+notify:
+  whatsapp:
+    enabled: true
+    server: "192.168.x.x"
+    port: 9009
+    to: "4917…"
+```
+
+Usage:
+
+```bash
+sudo gira-ble-bt-watchdog              # check; recover only if needed
+sudo gira-ble-bt-watchdog --hard-reset # force recovery + notify
+sudo gira-ble-bt-watchdog --dry-run -v
+journalctl -t gira-ble-bt-watchdog -n 50   # if logger used; else cron mail / syslog
+grep gira-ble-bt-watchdog /var/log/syslog | tail
+```
+
+`--hard-reset` always runs the recovery sequence (rfkill / power on /
+`systemctl restart bluetooth` if still down / `systemctl restart gira-ble-api`)
+and sends a WhatsApp message when notify is enabled. Cron runs are rate-limited
+so a flapping adapter does not restart forever.
+
+Also recommended on the Pi:
+
+```bash
+# persist journals across reboot (so RTL crash lines survive)
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+# set Storage=persistent in /etc/systemd/journald.conf, then:
+sudo systemctl restart systemd-journald
+
+# auto-power adapters after bluetoothd restart
+sudo sed -i 's/^#AutoEnable=true/AutoEnable=true/' /etc/bluetooth/main.conf
+sudo systemctl restart bluetooth
+```
+
 ## Updates
 
 Prefer a git checkout at `/usr/local/lib/gira-ble-api` (not a plain rsync copy):
