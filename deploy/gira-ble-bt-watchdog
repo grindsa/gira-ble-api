@@ -47,11 +47,18 @@ DEFAULT_STATE = Path(
 )
 DEFAULT_SERVICE = os.environ.get("GIRA_BLE_SERVICE", "gira-ble-api")
 
-# Kernel lines seen when the Realtek USB stick dies.
-RTL_PATTERNS = (
+# Kernel lines seen when the USB/Realtek HCI path wedges or resets.
+# Note: after "Resetting usb device" the adapter often comes back Powered:yes
+# while gira-ble-api's scanner is still dead — journal hits alone must recover.
+HCI_FAULT_PATTERNS = (
     re.compile(r"RTL:\s*hw err", re.I),
     re.compile(r"HCI reset during shutdown failed", re.I),
     re.compile(r"trigger devcoredump", re.I),
+    re.compile(r"\btx timeout\b", re.I),
+    re.compile(r"Opcode 0x[0-9a-f]+ failed:\s*-\d+", re.I),
+    re.compile(r"Unable to disable scanning:\s*-\d+", re.I),
+    re.compile(r"Resetting usb device", re.I),
+    re.compile(r"failed to resubmit", re.I),
 )
 
 
@@ -195,7 +202,7 @@ def list_hci_ifaces() -> list[str]:
     return sorted(p.name for p in sys_bt.iterdir() if p.name.startswith("hci"))
 
 
-def journal_rtl_hits(lookback_min: int) -> list[str]:
+def journal_hci_faults(lookback_min: int) -> list[str]:
     """Return matching kernel log lines from the lookback window."""
     since = f"{max(1, lookback_min)} minutes ago"
     try:
@@ -212,7 +219,7 @@ def journal_rtl_hits(lookback_min: int) -> list[str]:
         LOG.debug("journalctl rc=%s stderr=%s", proc.returncode, proc.stderr.strip())
     hits: list[str] = []
     for line in proc.stdout.splitlines():
-        if any(pat.search(line) for pat in RTL_PATTERNS):
+        if any(pat.search(line) for pat in HCI_FAULT_PATTERNS):
             hits.append(line.strip())
     return hits
 
@@ -366,24 +373,24 @@ def main(argv: list[str] | None = None) -> int:
     wa = cfg.whatsapp or WhatsAppConfig()
 
     powered = adapter_powered()
-    rtl_hits = journal_rtl_hits(cfg.journal_lookback_min)
+    hci_hits = journal_hci_faults(cfg.journal_lookback_min)
     LOG.info(
-        "check: powered=%s rtl_hits=%d hard_reset=%s",
+        "check: powered=%s hci_faults=%d hard_reset=%s",
         powered,
-        len(rtl_hits),
+        len(hci_hits),
         args.hard_reset,
     )
-    if rtl_hits:
-        for line in rtl_hits[:5]:
-            LOG.warning("RTL/journal: %s", line)
+    if hci_hits:
+        for line in hci_hits[:5]:
+            LOG.warning("HCI/journal: %s", line)
 
     reasons: list[str] = []
     if args.hard_reset:
         reasons.append("hard-reset")
     if not powered:
         reasons.append("adapter-not-powered")
-    if rtl_hits:
-        reasons.append("rtl-hw-err")
+    if hci_hits:
+        reasons.append("hci-fault")
 
     if not reasons:
         LOG.info("healthy — nothing to do")
@@ -405,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     recovered = recover(cfg=cfg, dry_run=args.dry_run, hard_reset=args.hard_reset)
-    detail = rtl_hits[0] if rtl_hits else ""
+    detail = hci_hits[0] if hci_hits else ""
     msg = build_message(reason, recovered, detail)
     LOG.warning(msg.replace("\n", " | "))
     send_whatsapp(wa, msg, dry_run=args.dry_run)

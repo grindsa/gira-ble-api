@@ -130,8 +130,10 @@ Confirm `Paired: yes` / `Bonded: yes`, then `sudo systemctl start gira-ble-api`.
 
 ## BLE watchdog (cron)
 
-Recovers a dead BlueZ adapter (powered-off / Realtek `RTL: hw err`) and restarts
-`gira-ble-api`. Runs every 15 minutes from `/etc/cron.d`.
+Recovers a dead BlueZ adapter (powered-off, Realtek `RTL: hw err`, HCI
+`tx timeout` / `Resetting usb device`, etc.) and restarts `gira-ble-api`.
+Runs every 15 minutes from `/etc/cron.d`. Journal hits alone trigger recovery
+even when the adapter looks `Powered: yes` again after a USB reset.
 
 ```bash
 sudo ln -sfn /usr/local/lib/gira-ble-api/deploy/gira-ble-bt-watchdog \
